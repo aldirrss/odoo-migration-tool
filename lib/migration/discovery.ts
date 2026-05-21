@@ -11,6 +11,7 @@ import { stagingDb, schema } from "../db/staging";
 import { getSourcePool } from "../db/source";
 import type { ConnectionProfile } from "../db/profiles";
 import { findTable } from "../odoo/modules";
+import { inferModuleSlug, inferTableType } from "../odoo/prefix-mapping";
 import type { Pool } from "pg";
 
 export interface DiscoveryResult {
@@ -217,6 +218,8 @@ export async function runDiscovery(
             importOrder: t.classification.type === "master" ? 200 : 600,
             columns: t.columns,
             confidence: t.classification.confidence,
+            moduleSlug: inferModuleSlug(t.tableName),
+            tableType: inferTableType(t.columns),
           };
         })
         .filter((v): v is NonNullable<typeof v> => v !== null);
@@ -238,6 +241,8 @@ export async function runDiscovery(
               dateFilterColumn: sql`CASE WHEN ${userClassifiedCol} THEN ${schema.discoveredTables.dateFilterColumn} ELSE excluded.date_filter_column END`,
               columns: sql`excluded.columns`,
               confidence: sql`CASE WHEN ${userClassifiedCol} THEN ${schema.discoveredTables.confidence} ELSE excluded.confidence END`,
+              moduleSlug: sql`CASE WHEN ${userClassifiedCol} THEN ${schema.discoveredTables.moduleSlug} ELSE excluded.module_slug END`,
+              tableType: sql`CASE WHEN ${userClassifiedCol} THEN ${schema.discoveredTables.tableType} ELSE excluded.table_type END`,
             },
           });
       }

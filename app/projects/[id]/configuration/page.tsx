@@ -18,6 +18,8 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { moduleRegistry } from "@/lib/odoo/modules";
+import { QualityRulesPanel } from "@/components/configuration/quality-rules-panel";
+import type { QualityRulesConfig } from "@/lib/migration/quality/types";
 
 type OnMissingDateColumn = "fallback" | "skip_filter" | "skip_table";
 
@@ -28,6 +30,7 @@ interface ProjectConfig {
   dateFallbackChain: string[];
   allowedModules: string[];
   onMissingDateColumn: OnMissingDateColumn;
+  qualityRules?: QualityRulesConfig | null;
 }
 
 export default function ConfigurationPage({
@@ -71,6 +74,7 @@ export default function ConfigurationPage({
           dateFallbackChain: payload.dateFallbackChain,
           allowedModules: payload.allowedModules,
           onMissingDateColumn: payload.onMissingDateColumn,
+          qualityRules: payload.qualityRules ?? null,
         }),
       });
       if (!r.ok) throw new Error(await r.text());
@@ -320,6 +324,11 @@ export default function ConfigurationPage({
           </div>
         </CardContent>
       </Card>
+
+      <QualityRulesPanel
+        value={draft.qualityRules ?? null}
+        onChange={(next) => setDraft({ ...draft, qualityRules: next })}
+      />
 
       <div className="sticky bottom-4 flex items-center justify-end gap-3 rounded-md border bg-background/95 p-3 shadow backdrop-blur">
         {feedback && (

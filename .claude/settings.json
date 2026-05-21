@@ -19,7 +19,10 @@
       "Bash(PGPASSWORD=postgres psql -h localhost -U postgres -d odoo_migration_staging -c \"\\\\d discovered_tables\")",
       "Bash(PGPASSWORD=postgres psql -h localhost -U postgres -d odoo_migration_staging -c \"\\\\d discovered_modules\")",
       "Bash(PGPASSWORD=postgres psql -h localhost -U postgres -d odoo_migration_staging -c \"\\\\d discovered_relations\")",
-      "Bash(grep -n \"fkByColumn=\\\\|fkByColumn$\" 'app/projects/[id]/staging/[table]/page.tsx')"
+      "Bash(grep -n \"fkByColumn=\\\\|fkByColumn$\" 'app/projects/[id]/staging/[table]/page.tsx')",
+      "mcp__session__session_list",
+      "mcp__session__session_read",
+      "mcp__session__session_write"
     ]
   }
 }

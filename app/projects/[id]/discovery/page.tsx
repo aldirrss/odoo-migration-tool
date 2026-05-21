@@ -39,7 +39,23 @@ interface DiscoveredTable {
   confidence: "high" | "medium" | "low";
   userClassified: boolean;
   enabled: boolean;
+  moduleSlug: string | null;
+  tableType: "master" | "transaction" | null;
 }
+
+const MODULE_SLUG_CHOICES = [
+  "base",
+  "accounting",
+  "pos",
+  "sale",
+  "purchase",
+  "stock",
+  "hr",
+  "mrp",
+  "crm",
+  "project",
+  "mail",
+] as const;
 
 interface DiscoveredRelation {
   id: number;
@@ -173,6 +189,8 @@ export default function DiscoveryPage({
         importOrder?: number;
         enabled?: boolean;
         userClassified?: true;
+        moduleSlug?: string | null;
+        tableType?: "master" | "transaction" | null;
       };
     }) => {
       const r = await fetch(
@@ -438,6 +456,8 @@ function TableRow({
     dateFilterColumn?: string | null;
     importOrder?: number;
     enabled?: boolean;
+    moduleSlug?: string | null;
+    tableType?: "master" | "transaction" | null;
   }) => void;
   onConfirm: () => void;
   onRelationChange: (
@@ -473,6 +493,43 @@ function TableRow({
           />
           <span className="text-xs">enabled</span>
         </label>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        <div className="space-y-1">
+          <label className="text-xs text-muted-foreground">Module slug (auto-classified)</label>
+          <select
+            className="h-9 w-full rounded-md border bg-background px-2 text-sm"
+            value={table.moduleSlug ?? ""}
+            onChange={(e) =>
+              onTableChange({ moduleSlug: e.target.value || null })
+            }
+          >
+            <option value="">unknown</option>
+            {MODULE_SLUG_CHOICES.map((slug) => (
+              <option key={slug} value={slug}>
+                {slug}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs text-muted-foreground">Table type (auto-classified)</label>
+          <select
+            className="h-9 w-full rounded-md border bg-background px-2 text-sm"
+            value={table.tableType ?? ""}
+            onChange={(e) =>
+              onTableChange({
+                tableType:
+                  (e.target.value as "master" | "transaction" | "") || null,
+              })
+            }
+          >
+            <option value="">unknown</option>
+            <option value="master">master</option>
+            <option value="transaction">transaction</option>
+          </select>
+        </div>
       </div>
 
       <div className="grid gap-3 md:grid-cols-3">

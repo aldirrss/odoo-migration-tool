@@ -41,10 +41,20 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { SplitViewEditor } from "@/components/split-view-editor";
+import { QualityFlagCell } from "@/components/quality-flag-cell";
+import type {
+  QualityFinding,
+  Severity,
+} from "@/lib/migration/quality/types";
 import { useMigrationStore } from "@/lib/store";
 import { findTable, getOutgoingRelations } from "@/lib/odoo/modules";
 import type { RelationDefinition } from "@/lib/odoo/types";
 import { inferFkRelation } from "@/lib/odoo/fk-heuristics";
+import {
+  isTranslationDict,
+  unwrapTranslation,
+  wrapTranslation,
+} from "@/lib/odoo/translation";
 
 interface StagedRecord {
   id: number;
@@ -56,6 +66,9 @@ interface StagedRecord {
   isDeleted: boolean;
   validationStatus: string;
   importStatus: string;
+  qualityFlags?: QualityFinding[] | null;
+  qualitySeverity?: Severity | null;
+  qualityOverridden?: boolean;
 }
 
 type BulkOperation =
@@ -103,6 +116,9 @@ export default function TableEditorPage({
   const [filterDirty, setFilterDirty] = useState(false);
   const [filterDeleted, setFilterDeleted] = useState<"any" | "yes" | "no">("no");
   const [filterValidation, setFilterValidation] = useState<string>("");
+  const [filterQuality, setFilterQuality] = useState<"all" | "block" | "warn" | "ok">(
+    "all",
+  );
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [visibleColumns, setVisibleColumns] = useState<string[] | null>(null);
   const [showColumnPicker, setShowColumnPicker] = useState(false);
@@ -216,10 +232,17 @@ export default function TableEditorPage({
     },
   });
 
-  const records = useMemo(
+  const rawRecords = useMemo(
     () => recordsQuery.data?.records ?? [],
     [recordsQuery.data?.records],
   );
+  const records = useMemo(() => {
+    if (filterQuality === "all") return rawRecords;
+    return rawRecords.filter((r) => {
+      const sev = r.qualitySeverity ?? "ok";
+      return sev === filterQuality;
+    });
+  }, [rawRecords, filterQuality]);
   const total = recordsQuery.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -294,6 +317,38 @@ export default function TableEditorPage({
     },
   });
 
+  const rescanMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeJobId) throw new Error("No active job");
+      const r = await fetch(`/api/projects/${projectId}/quality/scan`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jobId: activeJobId, tableName }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      return (await r.json()) as { scanned: number; flagged: number };
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["staged-records"] });
+      qc.invalidateQueries({ queryKey: ["staging-stats"] });
+      qc.invalidateQueries({ queryKey: ["project-quality-summary", projectId] });
+    },
+  });
+
+  const acknowledgeMutation = useMutation({
+    mutationFn: async (recordId: number) => {
+      const r = await fetch(
+        `/api/projects/${projectId}/staging/records/${recordId}/acknowledge-quality`,
+        { method: "POST" },
+      );
+      if (!r.ok) throw new Error(await r.text());
+      return (await r.json()) as { record: StagedRecord };
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["staged-records"] });
+    },
+  });
+
   const bulkMutation = useMutation({
     mutationFn: async (op: BulkOperation) => {
       const r = await fetch(
@@ -343,6 +398,12 @@ export default function TableEditorPage({
 
   const startEditingCell = (recordId: number, column: string, currentValue: unknown) => {
     setEditingCell({ recordId, column });
+    // For translation fields, edit only the displayed locale's text.
+    const t = unwrapTranslation(currentValue);
+    if (t) {
+      setEditValue(t.text);
+      return;
+    }
     setEditValue(currentValue == null ? "" : String(currentValue));
   };
 
@@ -350,8 +411,14 @@ export default function TableEditorPage({
     if (!editingCell) return;
     const current = (record.stagedData as Record<string, unknown>)[editingCell.column];
     let parsed: unknown = editValue;
-    if (typeof current === "number") parsed = Number(editValue);
-    else if (typeof current === "boolean") parsed = editValue === "true";
+    if (isTranslationDict(current)) {
+      // Preserve other locales; only update the preferred one.
+      parsed = wrapTranslation(current, editValue);
+    } else if (typeof current === "number") {
+      parsed = Number(editValue);
+    } else if (typeof current === "boolean") {
+      parsed = editValue === "true";
+    }
     const next = { ...(record.stagedData as Record<string, unknown>), [editingCell.column]: parsed };
     setEditingCell(null);
     cellSaveMutation.mutate({ recordId: record.id, nextStaged: next });
@@ -450,6 +517,37 @@ export default function TableEditorPage({
                 <option value="fail">fail</option>
               </select>
             </div>
+            <div className="flex items-center gap-1.5 text-sm">
+              <span>Quality:</span>
+              <select
+                className="h-8 rounded-md border bg-background px-2 text-sm"
+                value={filterQuality}
+                onChange={(e) =>
+                  setFilterQuality(
+                    e.target.value as "all" | "block" | "warn" | "ok",
+                  )
+                }
+              >
+                <option value="all">All</option>
+                <option value="block">Block only</option>
+                <option value="warn">Warn only</option>
+                <option value="ok">Clean only</option>
+              </select>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => rescanMutation.mutate()}
+              disabled={rescanMutation.isPending || !activeJobId}
+              title="Re-run the data-quality scan on this table"
+            >
+              {rescanMutation.isPending ? (
+                <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+              ) : (
+                <Wand2 className="mr-1 h-3 w-3" />
+              )}
+              Re-scan
+            </Button>
             <div className="ml-auto flex items-center gap-2">
               <Button
                 size="sm"
@@ -615,6 +713,7 @@ export default function TableEditorPage({
                       </TableHead>
                     ))}
                     <TableHead className="w-[80px]">flags</TableHead>
+                    <TableHead className="w-[90px]">quality</TableHead>
                     <TableHead className="w-[60px]"></TableHead>
                   </TableRow>
                 </TableHeader>
@@ -622,7 +721,7 @@ export default function TableEditorPage({
                   {recordsQuery.isLoading && (
                     <TableRow>
                       <TableCell
-                        colSpan={displayColumns.length + 4}
+                        colSpan={displayColumns.length + 6}
                         className="py-6 text-center"
                       >
                         <Loader2 className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
@@ -632,7 +731,7 @@ export default function TableEditorPage({
                   {!recordsQuery.isLoading && records.length === 0 && (
                     <TableRow>
                       <TableCell
-                        colSpan={displayColumns.length + 4}
+                        colSpan={displayColumns.length + 6}
                         className="py-6 text-center text-sm text-muted-foreground"
                       >
                         No records.
@@ -658,6 +757,12 @@ export default function TableEditorPage({
                         diffMode={false}
                         checked={checked}
                         toggleRowSelection={toggleRowSelection}
+                        onAcknowledgeQuality={(id) => acknowledgeMutation.mutate(id)}
+                        acknowledgingId={
+                          acknowledgeMutation.isPending
+                            ? (acknowledgeMutation.variables as number | undefined) ?? null
+                            : null
+                        }
                       />
                     );
                   })}
@@ -693,6 +798,7 @@ export default function TableEditorPage({
                     </TableHead>
                   ))}
                   <TableHead className="w-[80px]">flags</TableHead>
+                  <TableHead className="w-[90px]">quality</TableHead>
                   <TableHead className="w-[60px]"></TableHead>
                 </TableRow>
               </TableHeader>
@@ -700,7 +806,7 @@ export default function TableEditorPage({
                 {recordsQuery.isLoading && (
                   <TableRow>
                     <TableCell
-                      colSpan={displayColumns.length + 4}
+                      colSpan={displayColumns.length + 5}
                       className="py-6 text-center"
                     >
                       <Loader2 className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
@@ -710,7 +816,7 @@ export default function TableEditorPage({
                 {!recordsQuery.isLoading && records.length === 0 && (
                   <TableRow>
                     <TableCell
-                      colSpan={displayColumns.length + 4}
+                      colSpan={displayColumns.length + 5}
                       className="py-6 text-center text-sm text-muted-foreground"
                     >
                       No records match the current filter.
@@ -736,6 +842,12 @@ export default function TableEditorPage({
                       diffMode={diffMode}
                       checked={checked}
                       toggleRowSelection={toggleRowSelection}
+                      onAcknowledgeQuality={(id) => acknowledgeMutation.mutate(id)}
+                      acknowledgingId={
+                        acknowledgeMutation.isPending
+                          ? (acknowledgeMutation.variables as number | undefined) ?? null
+                          : null
+                      }
                     />
                   );
                 })}
@@ -847,6 +959,8 @@ function StagedRowCells({
   diffMode,
   checked,
   toggleRowSelection,
+  onAcknowledgeQuality,
+  acknowledgingId,
 }: {
   record: StagedRecord;
   displayColumns: string[];
@@ -862,6 +976,8 @@ function StagedRowCells({
   diffMode: boolean;
   checked: boolean;
   toggleRowSelection: (id: number, checked: boolean) => void;
+  onAcknowledgeQuality: (recordId: number) => void;
+  acknowledgingId: number | null;
 }) {
   return (
     <TableRow className={`align-top ${r.isDeleted ? "opacity-60" : ""}`}>
@@ -960,6 +1076,15 @@ function StagedRowCells({
             />
           )}
         </div>
+      </TableCell>
+      <TableCell>
+        <QualityFlagCell
+          severity={r.qualitySeverity ?? null}
+          findings={r.qualityFlags ?? null}
+          overridden={r.qualityOverridden}
+          onAcknowledge={() => onAcknowledgeQuality(r.id)}
+          isAcknowledging={acknowledgingId === r.id}
+        />
       </TableCell>
       <TableCell>
         <Button
@@ -1423,6 +1548,9 @@ function renderCell(value: unknown): string {
   if (value == null) return "—";
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
+  // Odoo translation field: show only the preferred locale's text.
+  const t = unwrapTranslation(value);
+  if (t) return t.text;
   return JSON.stringify(value);
 }
 

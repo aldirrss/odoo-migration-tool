@@ -12,6 +12,7 @@
  * column for the raw data.
  */
 
+import { sql } from "drizzle-orm";
 import {
   pgTable,
   serial,
@@ -89,6 +90,7 @@ export const projectConfigs = pgTable("project_configs", {
     .default(["base", "accounting", "pos"])
     .notNull(),
   onMissingDateColumn: text("on_missing_date_column").default("fallback").notNull(),
+  qualityRules: jsonb("quality_rules"),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });
 
@@ -106,6 +108,12 @@ export const extractionJobs = pgTable("extraction_jobs", {
   totalRecords: integer("total_records").default(0).notNull(),
   errorMessage: text("error_message"),
   cancelRequested: boolean("cancel_requested").default(false).notNull(),
+  // Live progress for the post-extraction quality scan phase. UI reads these
+  // to show "scanning <table> — X / Y rows" instead of a blank stuck modal.
+  qualityScanCurrentTable: text("quality_scan_current_table"),
+  qualityScanProgress: integer("quality_scan_progress").default(0).notNull(),
+  qualityScanTotal: integer("quality_scan_total").default(0).notNull(),
+  qualityScanSkipRequested: boolean("quality_scan_skip_requested").default(false).notNull(),
 });
 
 export const stagedRecords = pgTable(
@@ -125,6 +133,10 @@ export const stagedRecords = pgTable(
     validationMessages: jsonb("validation_messages"),
     importStatus: text("import_status").default("pending").notNull(),
     importError: text("import_error"),
+    qualityFlags: jsonb("quality_flags"),
+    qualitySeverity: text("quality_severity"),
+    qualityScannedAt: timestamp("quality_scanned_at", { withTimezone: true }),
+    qualityOverridden: boolean("quality_overridden").default(false).notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
   },
   (table) => ({
@@ -135,6 +147,9 @@ export const stagedRecords = pgTable(
     ),
     tableNameIdx: index("staged_records_table_name_idx").on(table.tableName),
     dirtyIdx: index("staged_records_dirty_idx").on(table.isDirty),
+    qualitySeverityIdx: index("staged_records_quality_severity_idx")
+      .on(table.extractionJobId, table.tableName, table.qualitySeverity)
+      .where(sql`${table.qualitySeverity} IS NOT NULL`),
   }),
 );
 
@@ -146,6 +161,7 @@ export const tableExtractionStatus = pgTable("table_extraction_status", {
   tableName: text("table_name").notNull(),
   status: text("status").notNull().default("pending"),
   recordCount: integer("record_count").default(0).notNull(),
+  expectedRecordCount: integer("expected_record_count"),
   errorMessage: text("error_message"),
   startedAt: timestamp("started_at"),
   finishedAt: timestamp("finished_at"),
@@ -210,6 +226,8 @@ export const discoveredTables = pgTable(
     confidence: text("confidence").notNull(),
     userClassified: boolean("user_classified").default(false).notNull(),
     enabled: boolean("enabled").default(false).notNull(),
+    moduleSlug: text("module_slug"),
+    tableType: text("table_type"),
   },
   (table) => ({
     uniqueTable: uniqueIndex("discovered_tables_project_table_uq").on(

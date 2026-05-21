@@ -14,12 +14,18 @@ const DEFAULTS = {
   onMissingDateColumn: "fallback" as const,
 };
 
+const ruleConfigSchema = z.object({
+  severity: z.enum(["ok", "warn", "block"]),
+  enabled: z.boolean(),
+});
+
 const bodySchema = z.object({
   transactionDateFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   dateFallbackEnabled: z.boolean(),
   dateFallbackChain: z.array(z.string().min(1)).min(1),
   allowedModules: z.array(z.string().min(1)),
   onMissingDateColumn: z.enum(["fallback", "skip_filter", "skip_table"]),
+  qualityRules: z.record(z.string(), ruleConfigSchema).nullable().optional(),
 });
 
 export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }) {

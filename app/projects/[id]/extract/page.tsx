@@ -13,6 +13,8 @@ import {
 } from "lucide-react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 
+import Link from "next/link";
+
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -30,9 +32,18 @@ import { useMigrationStore } from "@/lib/store";
 interface TableStatus {
   id: number;
   tableName: string;
-  status: "pending" | "running" | "done" | "failed";
+  status: "pending" | "running" | "done" | "failed" | "skipped" | "cancelled";
   recordCount: number;
+  expectedRecordCount?: number | null;
   errorMessage?: string | null;
+}
+
+interface QualitySummaryRow {
+  tableName: string;
+  block: number;
+  warn: number;
+  ok: number;
+  unscanned: number;
 }
 
 interface Project {
@@ -85,7 +96,8 @@ export default function ExtractPage({
       const data = query.state.data as
         | { job: { status: string } | null }
         | undefined;
-      return data?.job?.status === "running" ? 2000 : false;
+      const s = data?.job?.status;
+      return s === "running" || s === "scanning_quality" ? 2000 : false;
     },
     queryFn: async () => {
       const r = await fetch(
@@ -98,11 +110,25 @@ export default function ExtractPage({
         return { job: null, tables: [] as TableStatus[] };
       }
       return (await r.json()) as {
-        job: { status: string; cancelRequested?: boolean } | null;
+        job: {
+          status: string;
+          cancelRequested?: boolean;
+          qualityScanCurrentTable?: string | null;
+          qualityScanProgress?: number;
+          qualityScanTotal?: number;
+        } | null;
         tables: TableStatus[];
       };
     },
   });
+
+  // Optimistic "the user just clicked Start" flag. We need this because
+  // setActiveJob updates Zustand state asynchronously, so there is a brief
+  // render window where activeJobId is still null and statusQuery hasn't
+  // fired yet — without this flag the blocking modal would not appear until
+  // the next render after Zustand syncs, which felt like the page needed a
+  // manual refresh.
+  const [optimisticRunning, setOptimisticRunning] = useState(false);
 
   const startMutation = useMutation({
     mutationFn: async () => {
@@ -114,13 +140,26 @@ export default function ExtractPage({
       if (!r.ok) throw new Error(await r.text());
       return (await r.json()) as { jobId: number };
     },
+    onMutate: () => {
+      setOptimisticRunning(true);
+    },
     onSuccess: (data) => {
       setActiveJob(data.jobId);
-      // running is derived from statusQuery; trigger an immediate refetch so
-      // the modal opens without waiting for the next poll tick.
-      statusQuery.refetch();
+    },
+    onError: () => {
+      setOptimisticRunning(false);
     },
   });
+
+  // Release the optimistic flag once the server-side job state confirms a
+  // terminal status. Until then we trust the optimistic flag.
+  useEffect(() => {
+    const status = statusQuery.data?.job?.status;
+    if (!status) return;
+    if (status !== "running" && status !== "scanning_quality") {
+      setOptimisticRunning(false);
+    }
+  }, [statusQuery.data?.job?.status]);
 
   // Single source of truth for "is this extraction still in-flight": the job
   // row in the staging DB. Survives page reloads and tab restores. While we're
@@ -128,7 +167,10 @@ export default function ExtractPage({
   // Start button can't be double-clicked during the fetch window.
   const statusUnknown = !!activeJobId && statusQuery.isLoading;
   const running =
-    statusUnknown || statusQuery.data?.job?.status === "running";
+    optimisticRunning ||
+    statusUnknown ||
+    statusQuery.data?.job?.status === "running" ||
+    statusQuery.data?.job?.status === "scanning_quality";
 
   // Block tab close / reload while extraction is running.
   useEffect(() => {
@@ -152,6 +194,24 @@ export default function ExtractPage({
     window.addEventListener("popstate", handler);
     return () => window.removeEventListener("popstate", handler);
   }, [running]);
+
+  const jobDone =
+    !!activeJobId &&
+    !!statusQuery.data?.job &&
+    statusQuery.data.job.status !== "running" &&
+    statusQuery.data.job.status !== "scanning_quality";
+
+  const qualitySummaryQuery = useQuery({
+    queryKey: ["project-quality-summary", projectId, activeJobId],
+    enabled: jobDone && !!activeJobId,
+    queryFn: async () => {
+      const r = await fetch(
+        `/api/projects/${projectId}/quality/summary?jobId=${activeJobId}`,
+      );
+      if (!r.ok) return { byTable: [] as QualitySummaryRow[] };
+      return (await r.json()) as { byTable: QualitySummaryRow[] };
+    },
+  });
 
   const canStart =
     !!projectQuery.data?.sourceProfileId &&
@@ -236,8 +296,24 @@ export default function ExtractPage({
                     <TableCell className="text-right font-mono">
                       {t.recordCount.toLocaleString()}
                     </TableCell>
-                    <TableCell className="max-w-[200px] truncate text-xs text-muted-foreground">
-                      {t.errorMessage}
+                    <TableCell className="max-w-[280px] text-xs">
+                      {t.errorMessage ? (
+                        <details>
+                          <summary
+                            className={`cursor-pointer truncate ${
+                              t.status === "failed"
+                                ? "text-red-700"
+                                : "text-muted-foreground"
+                            }`}
+                            title={t.errorMessage}
+                          >
+                            {t.errorMessage}
+                          </summary>
+                          <pre className="mt-1 whitespace-pre-wrap break-words rounded border bg-muted/40 p-2 text-[11px] text-foreground">
+                            {t.errorMessage}
+                          </pre>
+                        </details>
+                      ) : null}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -247,12 +323,77 @@ export default function ExtractPage({
         </Card>
       )}
 
+      {jobDone &&
+        qualitySummaryQuery.data &&
+        qualitySummaryQuery.data.byTable.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Data quality summary</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Table</TableHead>
+                    <TableHead className="w-[80px] text-right">Block</TableHead>
+                    <TableHead className="w-[80px] text-right">Warn</TableHead>
+                    <TableHead className="w-[80px] text-right">OK</TableHead>
+                    <TableHead className="w-[160px]"></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {qualitySummaryQuery.data.byTable.map((row) => (
+                    <TableRow key={row.tableName}>
+                      <TableCell className="font-mono text-xs">
+                        {row.tableName}
+                      </TableCell>
+                      <TableCell className="text-right font-mono">
+                        {row.block > 0 ? (
+                          <span className="text-red-700">{row.block}</span>
+                        ) : (
+                          <span className="text-muted-foreground">0</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right font-mono">
+                        {row.warn > 0 ? (
+                          <span className="text-yellow-700">{row.warn}</span>
+                        ) : (
+                          <span className="text-muted-foreground">0</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right font-mono text-green-700">
+                        {row.ok}
+                      </TableCell>
+                      <TableCell>
+                        {(row.block > 0 || row.warn > 0) && (
+                          <Link
+                            href={`/projects/${projectId}/staging/${row.tableName}`}
+                            className="text-xs underline"
+                          >
+                            View flagged records →
+                          </Link>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        )}
+
       <ExtractionBlockingModal
         open={running}
         jobId={activeJobId}
         projectId={projectId}
         tables={statusQuery.data?.tables ?? []}
         cancelRequested={statusQuery.data?.job?.cancelRequested ?? false}
+        jobStatus={statusQuery.data?.job?.status ?? null}
+        qualityCurrentTable={
+          statusQuery.data?.job?.qualityScanCurrentTable ?? null
+        }
+        qualityProgress={statusQuery.data?.job?.qualityScanProgress ?? 0}
+        qualityTotal={statusQuery.data?.job?.qualityScanTotal ?? 0}
       />
     </div>
   );
@@ -264,21 +405,54 @@ function ExtractionBlockingModal({
   projectId,
   tables,
   cancelRequested,
+  jobStatus,
+  qualityCurrentTable,
+  qualityProgress,
+  qualityTotal,
 }: {
   open: boolean;
   jobId: number | null;
   projectId: number;
   tables: TableStatus[];
   cancelRequested: boolean;
+  jobStatus: string | null;
+  qualityCurrentTable: string | null;
+  qualityProgress: number;
+  qualityTotal: number;
 }) {
+  const isScanning = jobStatus === "scanning_quality";
   const total = tables.length;
   const finished = tables.filter(
-    (t) => t.status === "done" || t.status === "failed",
+    (t) => t.status === "done" ||
+      t.status === "failed" ||
+      t.status === "skipped" ||
+      t.status === "cancelled",
   ).length;
   const failed = tables.filter((t) => t.status === "failed").length;
   const runningRow = tables.find((t) => t.status === "running");
-  const percent = total === 0 ? 0 : Math.round((finished / total) * 100);
   const totalRecords = tables.reduce((acc, t) => acc + (t.recordCount ?? 0), 0);
+
+  // Per-table progress: when a table is running, the bar reflects rows
+  // streamed / total rows for THAT table (resets to 0 on each new table).
+  // When idle between tables (or after final flip), fall back to overall
+  // tables completed ratio.
+  let percent = 0;
+  let percentLabel = "";
+  if (runningRow) {
+    const expected = runningRow.expectedRecordCount ?? 0;
+    const done = runningRow.recordCount ?? 0;
+    if (expected > 0) {
+      percent = Math.min(100, Math.round((done / expected) * 100));
+      percentLabel = `${done.toLocaleString()} / ${expected.toLocaleString()} rows`;
+    } else {
+      // Unknown total — show indeterminate (small fixed sliver) plus row count.
+      percent = done > 0 ? 8 : 0;
+      percentLabel = `${done.toLocaleString()} rows`;
+    }
+  } else if (total > 0) {
+    percent = Math.round((finished / total) * 100);
+    percentLabel = `${percent}%`;
+  }
 
   // Stable, fixed-height log: show all rows but pin the running/recent ones to view.
   const recent = [...tables]
@@ -289,6 +463,20 @@ function ExtractionBlockingModal({
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
+  const [skipping, setSkipping] = useState(false);
+
+  const skipQualityScan = async () => {
+    if (!jobId) return;
+    setSkipping(true);
+    try {
+      await fetch(
+        `/api/projects/${projectId}/extract/skip-quality?jobId=${jobId}`,
+        { method: "POST" },
+      );
+    } finally {
+      setSkipping(false);
+    }
+  };
 
   const requestCancel = async () => {
     setCancelling(true);
@@ -323,46 +511,84 @@ function ExtractionBlockingModal({
                 <DialogPrimitive.Title className="text-lg font-semibold">
                   {cancelRequested
                     ? "Cancelling extraction..."
-                    : "Extraction in progress"}
+                    : isScanning
+                      ? "Scanning data quality"
+                      : "Extraction in progress"}
                 </DialogPrimitive.Title>
                 <DialogPrimitive.Description className="text-xs text-muted-foreground">
                   {jobId ? `Job #${jobId}` : ""}
                   {cancelRequested
                     ? " — waiting for the current batch to finish, then all extracted data will be deleted."
-                    : " — please wait until this finishes. Closing this tab or navigating away may leave the extraction in an inconsistent state."}
+                    : isScanning
+                      ? " — all tables extracted. Running quality checks (orphan FK, required fields, duplicates, …) on every staged record. You can skip this if you don't need flags right now."
+                      : " — please wait until this finishes. Closing this tab or navigating away may leave the extraction in an inconsistent state."}
                 </DialogPrimitive.Description>
               </div>
             </div>
 
             <div className="space-y-2">
-              <div className="flex items-center justify-between text-sm">
-                <span className="font-medium">
-                  {finished} / {total} tables
-                </span>
-                <span className="text-muted-foreground">{percent}%</span>
-              </div>
-              <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted">
-                <div
-                  className="h-full rounded-full bg-primary transition-all duration-300"
-                  style={{ width: `${percent}%` }}
-                />
-              </div>
+              {isScanning ? (
+                <>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="font-medium">
+                      Quality scan{" "}
+                      {qualityCurrentTable && (
+                        <span className="font-mono text-xs text-muted-foreground">
+                          ({qualityCurrentTable})
+                        </span>
+                      )}
+                    </span>
+                    <span className="text-muted-foreground">
+                      {qualityProgress.toLocaleString()} /{" "}
+                      {qualityTotal.toLocaleString()} records
+                      {qualityTotal > 0 &&
+                        ` (${Math.round((qualityProgress / qualityTotal) * 100)}%)`}
+                    </span>
+                  </div>
+                  <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full rounded-full bg-amber-500 transition-all duration-300"
+                      style={{
+                        width: `${qualityTotal === 0 ? 0 : Math.min(100, Math.round((qualityProgress / qualityTotal) * 100))}%`,
+                      }}
+                    />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="font-medium">
+                      {finished} / {total} tables
+                    </span>
+                    <span className="text-muted-foreground">
+                      {runningRow ? (
+                        <span className="font-mono">
+                          {runningRow.tableName} — {percentLabel}
+                        </span>
+                      ) : (
+                        percentLabel
+                      )}
+                    </span>
+                  </div>
+                  <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full rounded-full bg-primary transition-all duration-300"
+                      style={{ width: `${percent}%` }}
+                    />
+                  </div>
+                </>
+              )}
               <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
                 <span>
                   <strong className="text-foreground">
                     {totalRecords.toLocaleString()}
                   </strong>{" "}
-                  records extracted
+                  records extracted overall
                 </span>
                 {failed > 0 && (
                   <span className="flex items-center gap-1 text-red-700">
                     <AlertTriangle className="h-3 w-3" />
                     {failed} failed
-                  </span>
-                )}
-                {runningRow && (
-                  <span className="font-mono">
-                    Current: {runningRow.tableName}
                   </span>
                 )}
               </div>
@@ -379,21 +605,28 @@ function ExtractionBlockingModal({
                   </div>
                 ) : (
                   recent.map((t) => (
-                    <div
-                      key={t.id}
-                      className="flex items-center justify-between gap-2 px-1 py-0.5"
-                    >
-                      <span className="flex items-center gap-1.5 truncate">
-                        <StatusDot status={t.status} />
-                        {t.tableName}
-                      </span>
-                      <span className="text-muted-foreground">
-                        {t.status === "done"
-                          ? `${t.recordCount.toLocaleString()} rows`
-                          : t.status === "failed"
-                            ? "failed"
-                            : t.status}
-                      </span>
+                    <div key={t.id} className="px-1 py-0.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="flex items-center gap-1.5 truncate">
+                          <StatusDot status={t.status} />
+                          {t.tableName}
+                        </span>
+                        <span className="text-muted-foreground">
+                          {t.status === "done"
+                            ? `${t.recordCount.toLocaleString()} rows`
+                            : t.status === "failed"
+                              ? "failed"
+                              : t.status}
+                        </span>
+                      </div>
+                      {t.status === "failed" && t.errorMessage && (
+                        <div
+                          className="mt-0.5 ml-3.5 whitespace-pre-wrap break-words text-[11px] text-red-700"
+                          title={t.errorMessage}
+                        >
+                          {t.errorMessage}
+                        </div>
+                      )}
                     </div>
                   ))
                 )}
@@ -405,19 +638,31 @@ function ExtractionBlockingModal({
                 Do not close this tab. Navigation is blocked while the
                 extraction runs.
               </p>
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={() => setConfirmOpen(true)}
-                disabled={cancelling}
-              >
-                <StopCircle className="mr-2 h-4 w-4" />
-                {cancelling
-                  ? "Working..."
-                  : cancelRequested
-                    ? "Force stop now"
-                    : "Stop extraction"}
-              </Button>
+              <div className="flex gap-2">
+                {isScanning && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={skipQualityScan}
+                    disabled={skipping}
+                  >
+                    {skipping ? "Skipping..." : "Skip quality scan"}
+                  </Button>
+                )}
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => setConfirmOpen(true)}
+                  disabled={cancelling}
+                >
+                  <StopCircle className="mr-2 h-4 w-4" />
+                  {cancelling
+                    ? "Working..."
+                    : cancelRequested
+                      ? "Force stop now"
+                      : "Stop extraction"}
+                </Button>
+              </div>
             </div>
           </div>
         </DialogPrimitive.Content>

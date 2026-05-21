@@ -9,10 +9,16 @@ import {
   ArrowLeftRight,
   ExternalLink,
   Eye,
+  Globe,
   Pencil,
   RotateCcw,
 } from "lucide-react";
 import type { RelationDefinition } from "@/lib/odoo/types";
+import {
+  isTranslationDict,
+  unwrapTranslation,
+  wrapTranslation,
+} from "@/lib/odoo/translation";
 
 export type ViewMode = "source" | "edit" | "split";
 
@@ -45,7 +51,24 @@ export function SplitViewEditor({
   }, [sourceData, stagedData]);
 
   function updateField(field: string, value: string) {
-    onChange({ ...stagedData, [field]: parseValue(value, sourceData[field]) });
+    const currentStaged = stagedData[field];
+    const original = sourceData[field];
+    // Translation fields: rewrap text into the JSONB, preserving other locales.
+    if (isTranslationDict(currentStaged)) {
+      onChange({
+        ...stagedData,
+        [field]: wrapTranslation(currentStaged, value),
+      });
+      return;
+    }
+    if (isTranslationDict(original)) {
+      onChange({
+        ...stagedData,
+        [field]: wrapTranslation(original, value),
+      });
+      return;
+    }
+    onChange({ ...stagedData, [field]: parseValue(value, original) });
   }
 
   return (
@@ -151,16 +174,22 @@ function FieldPanel({
             typeof value === "number" && value > 0 ? value : null;
           const showFkButton =
             fkRel !== null && numericValue !== null && !!onPreviewFk;
+          const translationInfo = unwrapTranslation(value);
           return (
             <div key={field} className="grid grid-cols-[140px_1fr] items-center gap-2">
               <label
                 className={cn(
-                  "truncate text-xs font-medium",
+                  "flex items-center gap-1 truncate text-xs font-medium",
                   isChanged ? "text-yellow-600" : "text-muted-foreground",
                 )}
-                title={field}
+                title={
+                  translationInfo
+                    ? `${field} (translatable, showing ${translationInfo.locale})`
+                    : field
+                }
               >
-                {field}
+                {translationInfo && <Globe className="h-3 w-3 shrink-0" />}
+                <span className="truncate">{field}</span>
               </label>
               <div className="flex items-center gap-1">
                 {editable ? (
@@ -204,6 +233,9 @@ function FieldPanel({
 
 function stringify(v: unknown): string {
   if (v === null || v === undefined) return "";
+  // Odoo translation field: render only the preferred locale's text.
+  const t = unwrapTranslation(v);
+  if (t) return t.text;
   if (typeof v === "object") return JSON.stringify(v);
   return String(v);
 }

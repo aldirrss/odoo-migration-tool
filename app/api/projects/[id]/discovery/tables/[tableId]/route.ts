@@ -12,6 +12,8 @@ const patchSchema = z.object({
   importOrder: z.number().int().optional(),
   enabled: z.boolean().optional(),
   userClassified: z.literal(true).optional(),
+  moduleSlug: z.string().nullable().optional(),
+  tableType: z.enum(["master", "transaction"]).nullable().optional(),
 });
 
 export async function PATCH(
@@ -51,6 +53,8 @@ export async function PATCH(
         ...(body.userClassified !== undefined
           ? { userClassified: body.userClassified }
           : {}),
+        ...(body.moduleSlug !== undefined ? { moduleSlug: body.moduleSlug } : {}),
+        ...(body.tableType !== undefined ? { tableType: body.tableType } : {}),
       })
       .where(eq(schema.discoveredTables.id, tId))
       .returning();

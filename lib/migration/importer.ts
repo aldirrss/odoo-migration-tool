@@ -25,6 +25,7 @@ export interface ImportProgress {
   success: number;
   errors: number;
   skipped: number;
+  blocked: number;
   current?: number;
 }
 
@@ -39,6 +40,7 @@ export async function runImport(
   totalRecords: number;
   successCount: number;
   errorCount: number;
+  blockedCount: number;
 }> {
   const skipFailedValidation = options.skipFailedValidation ?? true;
 
@@ -58,6 +60,7 @@ export async function runImport(
   let totalRecords = 0;
   let totalSuccess = 0;
   let totalErrors = 0;
+  let totalBlocked = 0;
 
   try {
     for (const table of tables) {
@@ -71,6 +74,7 @@ export async function runImport(
       totalRecords += summary.total;
       totalSuccess += summary.success;
       totalErrors += summary.errors;
+      totalBlocked += summary.blocked;
     }
 
     await stagingDb
@@ -100,6 +104,7 @@ export async function runImport(
     totalRecords,
     successCount: totalSuccess,
     errorCount: totalErrors,
+    blockedCount: totalBlocked,
   };
 }
 
@@ -128,6 +133,7 @@ async function importTable(
     success: 0,
     errors: 0,
     skipped: 0,
+    blocked: 0,
   };
 
   if (records.length === 0) {
@@ -166,6 +172,18 @@ async function importTable(
         await stagingDb
           .update(schema.stagedRecords)
           .set({ importStatus: "skipped", importError: "Failed validation" })
+          .where(eq(schema.stagedRecords.id, rec.id));
+        continue;
+      }
+
+      if (rec.qualitySeverity === "block" && !rec.qualityOverridden) {
+        progress.blocked++;
+        await stagingDb
+          .update(schema.stagedRecords)
+          .set({
+            importStatus: "skipped",
+            importError: "Blocked by quality rule (not acknowledged)",
+          })
           .where(eq(schema.stagedRecords.id, rec.id));
         continue;
       }

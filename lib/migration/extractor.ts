@@ -18,6 +18,7 @@ import { getSourcePool } from "../db/source";
 import type { ConnectionProfile } from "../db/profiles";
 import { getAllTables } from "../odoo/modules/project-scope";
 import type { TableDefinition } from "../odoo/types";
+import { runQualityScan } from "./quality";
 
 const ENV_TRANSACTION_DATE_FROM = process.env.TRANSACTION_DATE_FROM || "2026-01-01";
 
@@ -187,7 +188,7 @@ export async function runExtractionWork(
     });
 
     try {
-      const result = await extractTable(job.id, table, pool, config, columnsCache);
+      const result = await extractTable(job.id, status.id, table, pool, config, columnsCache);
       totalRecords += result.count;
       if (result.cancelled) {
         cancelled = true;
@@ -264,6 +265,19 @@ export async function runExtractionWork(
     return { jobId: job.id, totalRecords: 0, failedTables, cancelled: true };
   }
 
+  // Post-extraction quality scan. Update job status so the UI can show a
+  // distinct "scanning quality" sub-step before the final completion flip.
+  await stagingDb
+    .update(schema.extractionJobs)
+    .set({ status: "scanning_quality" })
+    .where(sql`id = ${job.id}`);
+  try {
+    await runQualityScan(job.id, { projectId });
+  } catch (err) {
+    // Quality scan is best-effort — never block extraction completion on it.
+    console.error(`[extract job ${job.id}] quality scan failed`, err);
+  }
+
   await stagingDb
     .update(schema.extractionJobs)
     .set({
@@ -303,6 +317,7 @@ interface ExtractTableResult {
 
 async function extractTable(
   jobId: number,
+  statusId: number,
   table: TableDefinition,
   pool: import("pg").Pool,
   config: ProjectExtractionConfig,
@@ -358,6 +373,21 @@ async function extractTable(
   let count = 0;
   let lastId = 0;
   try {
+    // Pre-flight COUNT so the UI can show a per-table progress bar that
+    // resets to 0 each time we move to the next table.
+    try {
+      const countWhere = baseConditions.length > 0 ? `WHERE ${baseConditions.join(" AND ")}` : "";
+      const countSql = `SELECT COUNT(*)::bigint AS c FROM "${table.tableName}" ${countWhere}`;
+      const countRes = await client.query<{ c: string }>(countSql, baseParams);
+      const expected = Number(countRes.rows[0]?.c ?? 0);
+      await stagingDb
+        .update(schema.tableExtractionStatus)
+        .set({ expectedRecordCount: expected })
+        .where(sql`id = ${statusId}`);
+    } catch {
+      // Non-fatal — progress bar falls back to indeterminate.
+    }
+
     while (true) {
       if (await isCancelRequested(jobId)) {
         return { count, skipped: false, cancelled: true, dateColumnUsed, note };
@@ -391,6 +421,12 @@ async function extractTable(
           count += values.length;
         }
       }
+
+      // Push live progress so the UI's per-table bar fills as rows stream in.
+      await stagingDb
+        .update(schema.tableExtractionStatus)
+        .set({ recordCount: count })
+        .where(sql`id = ${statusId}`);
 
       lastId = result.rows[result.rows.length - 1]!.id as number;
       if (result.rows.length < FETCH_SIZE) break;

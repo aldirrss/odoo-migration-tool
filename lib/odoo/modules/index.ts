@@ -22,11 +22,27 @@ import type {
 import { baseModule } from "./base";
 import { accountingModule } from "./accounting";
 import { posModule } from "./pos";
+import { hrModule } from "./hr";
+import { stockModule } from "./stock";
+import { purchaseModule } from "./purchase";
+import { saleModule } from "./sale";
+import { mrpModule } from "./mrp";
+import { projectModule } from "./project";
+import { crmModule } from "./crm";
+import { mailModule } from "./mail";
 
 export const moduleRegistry: OdooModule[] = [
   baseModule,
   accountingModule,
+  hrModule,
+  stockModule,
+  purchaseModule,
+  saleModule,
+  mrpModule,
+  projectModule,
+  crmModule,
   posModule,
+  mailModule,
   // Add custom modules here
 ];
 
