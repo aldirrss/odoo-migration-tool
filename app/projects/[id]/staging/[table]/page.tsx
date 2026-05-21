@@ -17,6 +17,11 @@ import {
   GitCompare,
   ExternalLink,
   Columns2,
+  AlertOctagon,
+  AlertTriangle,
+  ArrowUp,
+  ArrowDown,
+  ChevronsUpDown,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -92,6 +97,8 @@ interface BulkResult {
   failures: Array<{ recordId: number; sourceId: number; reason: string }>;
 }
 
+type SortConfig = { column: string; direction: "asc" | "desc" } | null;
+
 const PAGE_SIZE = 50;
 const DEFAULT_COLUMN_BUDGET = 8;
 
@@ -136,6 +143,7 @@ export default function TableEditorPage({
     relation: RelationDefinition;
     sourceId: number;
   } | null>(null);
+  const [sortConfig, setSortConfig] = useState<SortConfig>(null);
 
   // Outgoing FK relations for this table (where this row points to a parent).
   // Module registry takes precedence; common Odoo column-name conventions
@@ -245,6 +253,50 @@ export default function TableEditorPage({
   }, [rawRecords, filterQuality]);
   const total = recordsQuery.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  const qualityCounts = useMemo(() => {
+    let blocks = 0;
+    let warns = 0;
+    for (const r of records) {
+      if (r.qualitySeverity === "block") blocks++;
+      else if (r.qualitySeverity === "warn") warns++;
+    }
+    return { blocks, warns };
+  }, [records]);
+
+  const handleSort = (column: string) => {
+    setSortConfig((prev) => {
+      if (!prev || prev.column !== column) return { column, direction: "asc" };
+      if (prev.direction === "asc") return { column, direction: "desc" };
+      return null;
+    });
+  };
+
+  const sortedRecords = useMemo(() => {
+    if (!sortConfig) return records;
+    return [...records].sort((a, b) => {
+      let aVal: unknown;
+      let bVal: unknown;
+      if (sortConfig.column === "__id__") {
+        aVal = a.sourceId;
+        bVal = b.sourceId;
+      } else {
+        aVal = (a.stagedData as Record<string, unknown>)[sortConfig.column];
+        bVal = (b.stagedData as Record<string, unknown>)[sortConfig.column];
+      }
+      if (aVal == null && bVal == null) return 0;
+      if (aVal == null) return sortConfig.direction === "asc" ? 1 : -1;
+      if (bVal == null) return sortConfig.direction === "asc" ? -1 : 1;
+      if (typeof aVal === "number" && typeof bVal === "number") {
+        return sortConfig.direction === "asc" ? aVal - bVal : bVal - aVal;
+      }
+      const cmp = String(aVal).localeCompare(String(bVal), undefined, {
+        numeric: true,
+        sensitivity: "base",
+      });
+      return sortConfig.direction === "asc" ? cmp : -cmp;
+    });
+  }, [records, sortConfig]);
 
   const allColumns = useMemo(() => {
     if (records.length === 0) return [] as string[];
@@ -626,11 +678,9 @@ export default function TableEditorPage({
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="w-[80px]">id</TableHead>
+                    <SortableHead colKey="__id__" label="id" sortConfig={sortConfig} onSort={handleSort} className="w-[80px]" />
                     {displayColumns.map((col) => (
-                      <TableHead key={col} className="font-mono text-xs">
-                        {col}
-                      </TableHead>
+                      <SortableHead key={col} colKey={col} label={col} sortConfig={sortConfig} onSort={handleSort} className="font-mono text-xs" />
                     ))}
                   </TableRow>
                 </TableHeader>
@@ -655,7 +705,7 @@ export default function TableEditorPage({
                       </TableCell>
                     </TableRow>
                   )}
-                  {records.map((r) => (
+                  {sortedRecords.map((r) => (
                     <TableRow
                       key={r.id}
                       className="align-top text-muted-foreground"
@@ -706,14 +756,17 @@ export default function TableEditorPage({
                         }
                       />
                     </TableHead>
-                    <TableHead className="w-[80px]">id</TableHead>
+                    <SortableHead colKey="__id__" label="id" sortConfig={sortConfig} onSort={handleSort} className="w-[80px]" />
                     {displayColumns.map((col) => (
-                      <TableHead key={col} className="font-mono text-xs">
-                        {col}
-                      </TableHead>
+                      <SortableHead key={col} colKey={col} label={col} sortConfig={sortConfig} onSort={handleSort} className="font-mono text-xs" />
                     ))}
                     <TableHead className="w-[80px]">flags</TableHead>
-                    <TableHead className="w-[90px]">quality</TableHead>
+                    <TableHead className="w-[140px]">
+                      <QualityColumnHeader
+                        blocks={qualityCounts.blocks}
+                        warns={qualityCounts.warns}
+                      />
+                    </TableHead>
                     <TableHead className="w-[60px]"></TableHead>
                   </TableRow>
                 </TableHeader>
@@ -738,7 +791,7 @@ export default function TableEditorPage({
                       </TableCell>
                     </TableRow>
                   )}
-                  {records.map((r) => {
+                  {sortedRecords.map((r) => {
                     const checked = selectedIds.has(r.id);
                     return (
                       <StagedRowCells
@@ -791,14 +844,17 @@ export default function TableEditorPage({
                       }
                     />
                   </TableHead>
-                  <TableHead className="w-[80px]">id</TableHead>
+                  <SortableHead colKey="__id__" label="id" sortConfig={sortConfig} onSort={handleSort} className="w-[80px]" />
                   {displayColumns.map((col) => (
-                    <TableHead key={col} className="font-mono text-xs">
-                      {col}
-                    </TableHead>
+                    <SortableHead key={col} colKey={col} label={col} sortConfig={sortConfig} onSort={handleSort} className="font-mono text-xs" />
                   ))}
                   <TableHead className="w-[80px]">flags</TableHead>
-                  <TableHead className="w-[90px]">quality</TableHead>
+                  <TableHead className="w-[140px]">
+                    <QualityColumnHeader
+                      blocks={qualityCounts.blocks}
+                      warns={qualityCounts.warns}
+                    />
+                  </TableHead>
                   <TableHead className="w-[60px]"></TableHead>
                 </TableRow>
               </TableHeader>
@@ -823,7 +879,7 @@ export default function TableEditorPage({
                     </TableCell>
                   </TableRow>
                 )}
-                {records.map((r) => {
+                {sortedRecords.map((r) => {
                   const checked = selectedIds.has(r.id);
                   return (
                     <StagedRowCells
@@ -940,6 +996,80 @@ export default function TableEditorPage({
           )}
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+function SortIcon({
+  active,
+  direction,
+}: {
+  active: boolean;
+  direction: "asc" | "desc";
+}) {
+  if (!active) {
+    return (
+      <ChevronsUpDown className="h-3 w-3 shrink-0 text-muted-foreground/30" />
+    );
+  }
+  return direction === "asc" ? (
+    <ArrowUp className="h-3 w-3 shrink-0 text-foreground" />
+  ) : (
+    <ArrowDown className="h-3 w-3 shrink-0 text-foreground" />
+  );
+}
+
+function SortableHead({
+  colKey,
+  label,
+  sortConfig,
+  onSort,
+  className = "",
+}: {
+  colKey: string;
+  label: string;
+  sortConfig: SortConfig;
+  onSort: (col: string) => void;
+  className?: string;
+}) {
+  const active = sortConfig?.column === colKey;
+  const direction = active ? sortConfig!.direction : "asc";
+  return (
+    <TableHead
+      className={`cursor-pointer select-none hover:bg-muted/40 ${className}`}
+      onClick={() => onSort(colKey)}
+      aria-sort={active ? (direction === "asc" ? "ascending" : "descending") : "none"}
+    >
+      <div className="flex items-center gap-1">
+        <span className="truncate">{label}</span>
+        <SortIcon active={active} direction={direction} />
+      </div>
+    </TableHead>
+  );
+}
+
+function QualityColumnHeader({
+  blocks,
+  warns,
+}: {
+  blocks: number;
+  warns: number;
+}) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span>quality</span>
+      {blocks > 0 && (
+        <span className="inline-flex items-center gap-0.5 rounded-md bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold text-red-600 ring-1 ring-inset ring-red-200">
+          <AlertOctagon className="h-2.5 w-2.5" />
+          {blocks}
+        </span>
+      )}
+      {warns > 0 && (
+        <span className="inline-flex items-center gap-0.5 rounded-md bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-600 ring-1 ring-inset ring-amber-200">
+          <AlertTriangle className="h-2.5 w-2.5" />
+          {warns}
+        </span>
+      )}
     </div>
   );
 }
@@ -1084,6 +1214,7 @@ function StagedRowCells({
           overridden={r.qualityOverridden}
           onAcknowledge={() => onAcknowledgeQuality(r.id)}
           isAcknowledging={acknowledgingId === r.id}
+          showInlineApprove
         />
       </TableCell>
       <TableCell>

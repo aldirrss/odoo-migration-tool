@@ -253,7 +253,9 @@ export async function getTableStats(jobId: number) {
       SUM(CASE WHEN is_dirty THEN 1 ELSE 0 END)::int AS dirty,
       SUM(CASE WHEN is_deleted THEN 1 ELSE 0 END)::int AS deleted,
       SUM(CASE WHEN validation_status = 'fail' THEN 1 ELSE 0 END)::int AS validation_failed,
-      SUM(CASE WHEN validation_status = 'warning' THEN 1 ELSE 0 END)::int AS validation_warning
+      SUM(CASE WHEN validation_status = 'warning' THEN 1 ELSE 0 END)::int AS validation_warning,
+      SUM(CASE WHEN quality_severity = 'block' AND is_deleted = false THEN 1 ELSE 0 END)::int AS quality_block,
+      SUM(CASE WHEN quality_severity = 'warn' AND is_deleted = false THEN 1 ELSE 0 END)::int AS quality_warn
     FROM staged_records
     WHERE extraction_job_id = ${jobId}
     GROUP BY table_name
@@ -266,6 +268,8 @@ export async function getTableStats(jobId: number) {
     deleted: number;
     validation_failed: number;
     validation_warning: number;
+    quality_block: number;
+    quality_warn: number;
   }>;
 }
 
