@@ -5,7 +5,14 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ArrowLeftRight, Eye, Pencil, RotateCcw } from "lucide-react";
+import {
+  ArrowLeftRight,
+  ExternalLink,
+  Eye,
+  Pencil,
+  RotateCcw,
+} from "lucide-react";
+import type { RelationDefinition } from "@/lib/odoo/types";
 
 export type ViewMode = "source" | "edit" | "split";
 
@@ -14,6 +21,13 @@ interface SplitViewProps {
   stagedData: Record<string, unknown>;
   onChange: (next: Record<string, unknown>) => void;
   onReset?: () => void;
+  /**
+   * Optional FK resolver. If provided, each field whose column resolves to a
+   * relation AND whose value is a positive integer gets a preview button.
+   */
+  getFk?: (column: string) => RelationDefinition | null;
+  /** Called when the user clicks the FK preview button on a field. */
+  onPreviewFk?: (relation: RelationDefinition, sourceId: number) => void;
 }
 
 export function SplitViewEditor({
@@ -21,6 +35,8 @@ export function SplitViewEditor({
   stagedData,
   onChange,
   onReset,
+  getFk,
+  onPreviewFk,
 }: SplitViewProps) {
   const [mode, setMode] = useState<ViewMode>("split");
   const fieldNames = useMemo(() => {
@@ -72,6 +88,8 @@ export function SplitViewEditor({
             fieldNames={fieldNames}
             editable={false}
             stagedData={stagedData}
+            getFk={getFk}
+            onPreviewFk={onPreviewFk}
           />
         )}
         {(mode === "edit" || mode === "split") && (
@@ -83,6 +101,8 @@ export function SplitViewEditor({
             stagedData={stagedData}
             sourceData={sourceData}
             onFieldChange={updateField}
+            getFk={getFk}
+            onPreviewFk={onPreviewFk}
           />
         )}
       </div>
@@ -98,6 +118,8 @@ interface FieldPanelProps {
   stagedData: Record<string, unknown>;
   sourceData?: Record<string, unknown>;
   onFieldChange?: (field: string, value: string) => void;
+  getFk?: (column: string) => RelationDefinition | null;
+  onPreviewFk?: (relation: RelationDefinition, sourceId: number) => void;
 }
 
 function FieldPanel({
@@ -108,6 +130,8 @@ function FieldPanel({
   stagedData,
   sourceData,
   onFieldChange,
+  getFk,
+  onPreviewFk,
 }: FieldPanelProps) {
   return (
     <div className="space-y-3">
@@ -122,6 +146,11 @@ function FieldPanel({
               : editable
                 ? JSON.stringify(value) !== JSON.stringify(sourceValue)
                 : JSON.stringify(sourceValue) !== JSON.stringify(stagedData[field]);
+          const fkRel = getFk?.(field) ?? null;
+          const numericValue =
+            typeof value === "number" && value > 0 ? value : null;
+          const showFkButton =
+            fkRel !== null && numericValue !== null && !!onPreviewFk;
           return (
             <div key={field} className="grid grid-cols-[140px_1fr] items-center gap-2">
               <label
@@ -133,23 +162,38 @@ function FieldPanel({
               >
                 {field}
               </label>
-              {editable ? (
-                <Input
-                  className={cn("h-8 text-xs", isChanged && "border-yellow-500 bg-yellow-50")}
-                  value={stringify(value)}
-                  onChange={(e) => onFieldChange?.(field, e.target.value)}
-                />
-              ) : (
-                <div
-                  className={cn(
-                    "min-h-8 truncate rounded border bg-muted/30 px-2 py-1 text-xs",
-                    isChanged && "bg-yellow-50",
-                  )}
-                  title={stringify(value)}
-                >
-                  {stringify(value)}
-                </div>
-              )}
+              <div className="flex items-center gap-1">
+                {editable ? (
+                  <Input
+                    className={cn(
+                      "h-8 text-xs",
+                      isChanged && "border-yellow-500 bg-yellow-50",
+                    )}
+                    value={stringify(value)}
+                    onChange={(e) => onFieldChange?.(field, e.target.value)}
+                  />
+                ) : (
+                  <div
+                    className={cn(
+                      "min-h-8 flex-1 truncate rounded border bg-muted/30 px-2 py-1 text-xs",
+                      isChanged && "bg-yellow-50",
+                    )}
+                    title={stringify(value)}
+                  >
+                    {stringify(value)}
+                  </div>
+                )}
+                {showFkButton && (
+                  <button
+                    type="button"
+                    className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                    title={`Preview ${fkRel.toTable}#${numericValue}`}
+                    onClick={() => onPreviewFk?.(fkRel, numericValue)}
+                  >
+                    <ExternalLink className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
             </div>
           );
         })}

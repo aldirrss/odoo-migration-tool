@@ -22,7 +22,17 @@ export const useMigrationStore = create<MigrationState>()(
       sourceProfileId: null,
       targetProfileId: null,
       activeJobId: null,
-      setCurrentProject: (id) => set({ currentProjectId: id }),
+      setCurrentProject: (id) =>
+        set((s) =>
+          s.currentProjectId === id
+            ? { currentProjectId: id }
+            : {
+                currentProjectId: id,
+                activeJobId: null,
+                sourceProfileId: null,
+                targetProfileId: null,
+              },
+        ),
       setSourceProfile: (id) => set({ sourceProfileId: id }),
       setTargetProfile: (id) => set({ targetProfileId: id }),
       setActiveJob: (id) => set({ activeJobId: id }),

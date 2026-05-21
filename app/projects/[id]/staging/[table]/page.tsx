@@ -14,6 +14,9 @@ import {
   RotateCcw,
   Trash2,
   Undo2,
+  GitCompare,
+  ExternalLink,
+  Columns2,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -39,7 +42,9 @@ import {
 } from "@/components/ui/dialog";
 import { SplitViewEditor } from "@/components/split-view-editor";
 import { useMigrationStore } from "@/lib/store";
-import { findTable } from "@/lib/odoo/modules";
+import { findTable, getOutgoingRelations } from "@/lib/odoo/modules";
+import type { RelationDefinition } from "@/lib/odoo/types";
+import { inferFkRelation } from "@/lib/odoo/fk-heuristics";
 
 interface StagedRecord {
   id: number;
@@ -109,6 +114,39 @@ export default function TableEditorPage({
   } | null>(null);
   const [editValue, setEditValue] = useState<string>("");
   const [bulkResult, setBulkResult] = useState<BulkResult | null>(null);
+  const [diffMode, setDiffMode] = useState(false);
+  const [splitView, setSplitView] = useState(false);
+  const [fkPreview, setFkPreview] = useState<{
+    relation: RelationDefinition;
+    sourceId: number;
+  } | null>(null);
+
+  // Outgoing FK relations for this table (where this row points to a parent).
+  // Module registry takes precedence; common Odoo column-name conventions
+  // (parent_id, create_uid, partner_id, etc.) fill in the rest via heuristics.
+  const fkByColumn = useMemo(() => {
+    const out = new Map<string, RelationDefinition>();
+    for (const rel of getOutgoingRelations(tableName)) {
+      out.set(rel.fromColumn, rel);
+    }
+    // Augment with heuristic-inferred FKs that aren't already declared.
+    // We don't know the full column set yet; consult heuristics lazily by
+    // also exposing a resolver. For now we'll attempt inference for any
+    // column we observe via a thin wrapper below.
+    return out;
+  }, [tableName]);
+
+  const fkResolver = useMemo(() => {
+    const cache = new Map<string, RelationDefinition | null>();
+    return (column: string): RelationDefinition | null => {
+      const cached = cache.get(column);
+      if (cached !== undefined) return cached;
+      const declared = fkByColumn.get(column);
+      const result = declared ?? inferFkRelation(tableName, column);
+      cache.set(column, result);
+      return result;
+    };
+  }, [fkByColumn, tableName]);
 
   const tableDef = findTable(tableName);
 
@@ -160,6 +198,15 @@ export default function TableEditorPage({
       if (filterDeleted === "no") url.searchParams.set("deleted", "0");
       if (filterValidation) url.searchParams.set("validationStatus", filterValidation);
       const r = await fetch(url.toString());
+      if (!r.ok) {
+        setActiveJob(null);
+        return {
+          records: [] as StagedRecord[],
+          total: 0,
+          page: 1,
+          pageSize: PAGE_SIZE,
+        };
+      }
       return (await r.json()) as {
         records: StagedRecord[];
         total: number;
@@ -287,18 +334,6 @@ export default function TableEditorPage({
     setSelectedIds(new Set(data.ids));
   };
 
-  const togglePageSelection = (checked: boolean) => {
-    if (checked) {
-      const next = new Set(selectedIds);
-      for (const r of records) next.add(r.id);
-      setSelectedIds(next);
-    } else {
-      const next = new Set(selectedIds);
-      for (const r of records) next.delete(r.id);
-      setSelectedIds(next);
-    }
-  };
-
   const toggleRowSelection = (id: number, checked: boolean) => {
     const next = new Set(selectedIds);
     if (checked) next.add(id);
@@ -334,11 +369,6 @@ export default function TableEditorPage({
       </Card>
     );
   }
-
-  const allPageSelected =
-    records.length > 0 && records.every((r) => selectedIds.has(r.id));
-  const somePageSelected =
-    records.some((r) => selectedIds.has(r.id)) && !allPageSelected;
 
   return (
     <div className="space-y-4">
@@ -423,6 +453,30 @@ export default function TableEditorPage({
             <div className="ml-auto flex items-center gap-2">
               <Button
                 size="sm"
+                variant={diffMode ? "default" : "outline"}
+                onClick={() => {
+                  setDiffMode((v) => !v);
+                  if (!diffMode) setSplitView(false);
+                }}
+                title="Show source vs staged stacked inside each cell"
+              >
+                <GitCompare className="mr-1 h-3 w-3" />
+                Diff
+              </Button>
+              <Button
+                size="sm"
+                variant={splitView ? "default" : "outline"}
+                onClick={() => {
+                  setSplitView((v) => !v);
+                  if (!splitView) setDiffMode(false);
+                }}
+                title="Show two side-by-side tables: source (read-only) | staged (editable)"
+              >
+                <Columns2 className="mr-1 h-3 w-3" />
+                Split
+              </Button>
+              <Button
+                size="sm"
                 variant="outline"
                 onClick={() => setShowColumnPicker(true)}
               >
@@ -464,125 +518,232 @@ export default function TableEditorPage({
         </CardContent>
       </Card>
 
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-[40px]">
-                  <Checkbox
-                    checked={allPageSelected || somePageSelected}
-                    onCheckedChange={(v) => togglePageSelection(v === true)}
-                  />
-                </TableHead>
-                <TableHead className="w-[80px]">id</TableHead>
-                {displayColumns.map((col) => (
-                  <TableHead key={col} className="font-mono text-xs">
-                    {col}
-                  </TableHead>
-                ))}
-                <TableHead className="w-[80px]">flags</TableHead>
-                <TableHead className="w-[60px]"></TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {recordsQuery.isLoading && (
-                <TableRow>
-                  <TableCell colSpan={displayColumns.length + 4} className="py-6 text-center">
-                    <Loader2 className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
-                  </TableCell>
-                </TableRow>
-              )}
-              {!recordsQuery.isLoading && records.length === 0 && (
-                <TableRow>
-                  <TableCell
-                    colSpan={displayColumns.length + 4}
-                    className="py-6 text-center text-sm text-muted-foreground"
-                  >
-                    No records match the current filter.
-                  </TableCell>
-                </TableRow>
-              )}
-              {records.map((r) => {
-                const checked = selectedIds.has(r.id);
-                return (
-                  <TableRow key={r.id} className={r.isDeleted ? "opacity-60" : ""}>
-                    <TableCell>
-                      <Checkbox
-                        checked={checked}
-                        onCheckedChange={(v) => toggleRowSelection(r.id, v === true)}
-                      />
-                    </TableCell>
-                    <TableCell className="font-mono text-xs">{r.sourceId}</TableCell>
-                    {displayColumns.map((col) => {
-                      const value = (r.stagedData as Record<string, unknown>)[col];
-                      const isEditing =
-                        editingCell?.recordId === r.id && editingCell?.column === col;
-                      return (
-                        <TableCell key={col} className="text-xs">
-                          {isEditing ? (
-                            <input
-                              autoFocus
-                              value={editValue}
-                              onChange={(e) => setEditValue(e.target.value)}
-                              onBlur={() => commitCellEdit(r)}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") commitCellEdit(r);
-                                else if (e.key === "Escape") setEditingCell(null);
-                              }}
-                              className="h-7 w-full rounded border bg-background px-1.5"
-                            />
-                          ) : (
-                            <div
-                              className="cursor-text truncate"
-                              onClick={() => startEditingCell(r.id, col, value)}
-                              title={String(value ?? "")}
-                            >
-                              {renderCell(value)}
-                            </div>
-                          )}
-                        </TableCell>
-                      );
-                    })}
-                    <TableCell>
-                      <div className="flex gap-1">
-                        {r.isDirty && (
-                          <span
-                            className="h-2 w-2 rounded-full bg-yellow-500"
-                            title="dirty"
-                          />
-                        )}
-                        {r.isDeleted && (
-                          <span
-                            className="h-2 w-2 rounded-full bg-red-500"
-                            title="deleted"
-                          />
-                        )}
-                        {r.validationStatus === "fail" && (
-                          <span
-                            className="h-2 w-2 rounded-full bg-red-700"
-                            title="validation failed"
-                          />
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        onClick={() => setInspectId(r.id)}
-                        title="Inspect"
+      {splitView ? (
+        <div className="grid grid-cols-2 gap-3">
+          <Card>
+            <div className="border-b bg-muted/30 px-3 py-1.5 text-xs font-semibold text-muted-foreground">
+              Source (read-only)
+            </div>
+            <CardContent className="p-0">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-[80px]">id</TableHead>
+                    {displayColumns.map((col) => (
+                      <TableHead key={col} className="font-mono text-xs">
+                        {col}
+                      </TableHead>
+                    ))}
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {recordsQuery.isLoading && (
+                    <TableRow>
+                      <TableCell
+                        colSpan={displayColumns.length + 1}
+                        className="py-6 text-center"
                       >
-                        <Eye className="h-3.5 w-3.5" />
-                      </Button>
+                        <Loader2 className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
+                      </TableCell>
+                    </TableRow>
+                  )}
+                  {!recordsQuery.isLoading && records.length === 0 && (
+                    <TableRow>
+                      <TableCell
+                        colSpan={displayColumns.length + 1}
+                        className="py-6 text-center text-sm text-muted-foreground"
+                      >
+                        No records.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                  {records.map((r) => (
+                    <TableRow
+                      key={r.id}
+                      className="align-top text-muted-foreground"
+                    >
+                      <TableCell className="font-mono text-xs">
+                        {r.sourceId}
+                      </TableCell>
+                      {displayColumns.map((col) => {
+                        const sourceValue = (r.sourceData as Record<string, unknown>)[col];
+                        return (
+                          <TableCell
+                            key={col}
+                            className="text-xs"
+                            title={String(sourceValue ?? "")}
+                          >
+                            <div className="truncate">
+                              {renderCell(sourceValue)}
+                            </div>
+                          </TableCell>
+                        );
+                      })}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <div className="border-b border-primary/30 bg-primary/5 px-3 py-1.5 text-xs font-semibold text-primary">
+              Staging (editable)
+            </div>
+            <CardContent className="p-0">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-[40px]">
+                      <Checkbox
+                        checked={selectedIds.size > 0}
+                        onCheckedChange={(v) => {
+                          if (v === true) selectAllMatchingFilter();
+                          else setSelectedIds(new Set());
+                        }}
+                        title={
+                          selectedIds.size > 0
+                            ? "Clear selection"
+                            : "Select all matching filter"
+                        }
+                      />
+                    </TableHead>
+                    <TableHead className="w-[80px]">id</TableHead>
+                    {displayColumns.map((col) => (
+                      <TableHead key={col} className="font-mono text-xs">
+                        {col}
+                      </TableHead>
+                    ))}
+                    <TableHead className="w-[80px]">flags</TableHead>
+                    <TableHead className="w-[60px]"></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {recordsQuery.isLoading && (
+                    <TableRow>
+                      <TableCell
+                        colSpan={displayColumns.length + 4}
+                        className="py-6 text-center"
+                      >
+                        <Loader2 className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
+                      </TableCell>
+                    </TableRow>
+                  )}
+                  {!recordsQuery.isLoading && records.length === 0 && (
+                    <TableRow>
+                      <TableCell
+                        colSpan={displayColumns.length + 4}
+                        className="py-6 text-center text-sm text-muted-foreground"
+                      >
+                        No records.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                  {records.map((r) => {
+                    const checked = selectedIds.has(r.id);
+                    return (
+                      <StagedRowCells
+                        key={r.id}
+                        record={r}
+                        displayColumns={displayColumns}
+                        editingCell={editingCell}
+                        editValue={editValue}
+                        setEditValue={setEditValue}
+                        startEditingCell={startEditingCell}
+                        commitCellEdit={commitCellEdit}
+                        setEditingCell={setEditingCell}
+                        getFk={fkResolver}
+                        setFkPreview={setFkPreview}
+                        setInspectId={setInspectId}
+                        diffMode={false}
+                        checked={checked}
+                        toggleRowSelection={toggleRowSelection}
+                      />
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        </div>
+      ) : (
+        <Card>
+          <CardContent className="p-0">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-[40px]">
+                    <Checkbox
+                      checked={selectedIds.size > 0}
+                      onCheckedChange={(v) => {
+                        if (v === true) selectAllMatchingFilter();
+                        else setSelectedIds(new Set());
+                      }}
+                      title={
+                        selectedIds.size > 0
+                          ? "Clear selection"
+                          : "Select all matching filter"
+                      }
+                    />
+                  </TableHead>
+                  <TableHead className="w-[80px]">id</TableHead>
+                  {displayColumns.map((col) => (
+                    <TableHead key={col} className="font-mono text-xs">
+                      {col}
+                    </TableHead>
+                  ))}
+                  <TableHead className="w-[80px]">flags</TableHead>
+                  <TableHead className="w-[60px]"></TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {recordsQuery.isLoading && (
+                  <TableRow>
+                    <TableCell
+                      colSpan={displayColumns.length + 4}
+                      className="py-6 text-center"
+                    >
+                      <Loader2 className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
                     </TableCell>
                   </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+                )}
+                {!recordsQuery.isLoading && records.length === 0 && (
+                  <TableRow>
+                    <TableCell
+                      colSpan={displayColumns.length + 4}
+                      className="py-6 text-center text-sm text-muted-foreground"
+                    >
+                      No records match the current filter.
+                    </TableCell>
+                  </TableRow>
+                )}
+                {records.map((r) => {
+                  const checked = selectedIds.has(r.id);
+                  return (
+                    <StagedRowCells
+                      key={r.id}
+                      record={r}
+                      displayColumns={displayColumns}
+                      editingCell={editingCell}
+                      editValue={editValue}
+                      setEditValue={setEditValue}
+                      startEditingCell={startEditingCell}
+                      commitCellEdit={commitCellEdit}
+                      setEditingCell={setEditingCell}
+                      getFk={fkResolver}
+                      setFkPreview={setFkPreview}
+                      setInspectId={setInspectId}
+                      diffMode={diffMode}
+                      checked={checked}
+                      toggleRowSelection={toggleRowSelection}
+                    />
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
 
       <div className="flex items-center justify-between text-sm text-muted-foreground">
         <span>
@@ -629,12 +790,19 @@ export default function TableEditorPage({
         isPending={bulkMutation.isPending}
       />
 
+      <FkPreviewDialog
+        projectId={projectId}
+        jobId={activeJobId}
+        preview={fkPreview}
+        onClose={() => setFkPreview(null)}
+      />
+
       <Dialog
         open={inspectRecord !== null}
         onOpenChange={(o) => !o && setInspectId(null)}
       >
-        <DialogContent className="max-w-3xl">
-          <DialogHeader>
+        <DialogContent className="flex max-h-[90vh] max-w-3xl flex-col gap-0 p-0">
+          <DialogHeader className="border-b p-6 pb-4">
             <DialogTitle>
               Inspect #{inspectRecord?.sourceId}
             </DialogTitle>
@@ -652,6 +820,10 @@ export default function TableEditorPage({
                 )
               }
               isSaving={inspectSaveMutation.isPending}
+              getFk={fkResolver}
+              onPreviewFk={(relation, sourceId) =>
+                setFkPreview({ relation, sourceId })
+              }
             />
           )}
         </DialogContent>
@@ -660,31 +832,293 @@ export default function TableEditorPage({
   );
 }
 
+function StagedRowCells({
+  record: r,
+  displayColumns,
+  editingCell,
+  editValue,
+  setEditValue,
+  startEditingCell,
+  commitCellEdit,
+  setEditingCell,
+  getFk,
+  setFkPreview,
+  setInspectId,
+  diffMode,
+  checked,
+  toggleRowSelection,
+}: {
+  record: StagedRecord;
+  displayColumns: string[];
+  editingCell: { recordId: number; column: string } | null;
+  editValue: string;
+  setEditValue: (v: string) => void;
+  startEditingCell: (recordId: number, column: string, currentValue: unknown) => void;
+  commitCellEdit: (record: StagedRecord) => void;
+  setEditingCell: (v: { recordId: number; column: string } | null) => void;
+  getFk: (column: string) => RelationDefinition | null;
+  setFkPreview: (v: { relation: RelationDefinition; sourceId: number } | null) => void;
+  setInspectId: (id: number | null) => void;
+  diffMode: boolean;
+  checked: boolean;
+  toggleRowSelection: (id: number, checked: boolean) => void;
+}) {
+  return (
+    <TableRow className={`align-top ${r.isDeleted ? "opacity-60" : ""}`}>
+      <TableCell>
+        <Checkbox
+          checked={checked}
+          onCheckedChange={(v) => toggleRowSelection(r.id, v === true)}
+        />
+      </TableCell>
+      <TableCell className="font-mono text-xs">{r.sourceId}</TableCell>
+      {displayColumns.map((col) => {
+        const stagedValue = (r.stagedData as Record<string, unknown>)[col];
+        const sourceValue = (r.sourceData as Record<string, unknown>)[col];
+        const isEditing =
+          editingCell?.recordId === r.id && editingCell?.column === col;
+        const changed =
+          JSON.stringify(sourceValue) !== JSON.stringify(stagedValue);
+        const fkRel = getFk(col);
+        const fkTarget =
+          fkRel && typeof stagedValue === "number" && stagedValue > 0
+            ? stagedValue
+            : null;
+        return (
+          <TableCell
+            key={col}
+            className={`text-xs ${changed ? "bg-yellow-50" : ""}`}
+          >
+            {isEditing ? (
+              <input
+                autoFocus
+                value={editValue}
+                onChange={(e) => setEditValue(e.target.value)}
+                onBlur={() => commitCellEdit(r)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitCellEdit(r);
+                  else if (e.key === "Escape") setEditingCell(null);
+                }}
+                className="h-7 w-full rounded border bg-background px-1.5"
+              />
+            ) : (
+              <div className="flex items-center gap-1">
+                <div
+                  className="flex-1 cursor-text truncate"
+                  onClick={() => startEditingCell(r.id, col, stagedValue)}
+                  title={String(stagedValue ?? "")}
+                >
+                  {diffMode && changed ? (
+                    <span className="flex flex-col leading-tight">
+                      <span className="text-[10px] text-muted-foreground line-through">
+                        {renderCell(sourceValue)}
+                      </span>
+                      <span className="font-semibold">
+                        {renderCell(stagedValue)}
+                      </span>
+                    </span>
+                  ) : (
+                    renderCell(stagedValue)
+                  )}
+                </div>
+                {fkRel && fkTarget !== null && (
+                  <button
+                    type="button"
+                    className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                    title={`Preview ${fkRel.toTable}#${fkTarget}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setFkPreview({ relation: fkRel, sourceId: fkTarget });
+                    }}
+                  >
+                    <ExternalLink className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
+            )}
+          </TableCell>
+        );
+      })}
+      <TableCell>
+        <div className="flex gap-1">
+          {r.isDirty && (
+            <span
+              className="h-2 w-2 rounded-full bg-yellow-500"
+              title="dirty"
+            />
+          )}
+          {r.isDeleted && (
+            <span
+              className="h-2 w-2 rounded-full bg-red-500"
+              title="deleted"
+            />
+          )}
+          {r.validationStatus === "fail" && (
+            <span
+              className="h-2 w-2 rounded-full bg-red-700"
+              title="validation failed"
+            />
+          )}
+        </div>
+      </TableCell>
+      <TableCell>
+        <Button
+          size="icon"
+          variant="ghost"
+          onClick={() => setInspectId(r.id)}
+          title="Inspect"
+        >
+          <Eye className="h-3.5 w-3.5" />
+        </Button>
+      </TableCell>
+    </TableRow>
+  );
+}
+
+function FkPreviewDialog({
+  projectId,
+  jobId,
+  preview,
+  onClose,
+}: {
+  projectId: number;
+  jobId: number | null;
+  preview: { relation: RelationDefinition; sourceId: number } | null;
+  onClose: () => void;
+}) {
+  const previewQuery = useQuery({
+    queryKey: [
+      "fk-preview",
+      projectId,
+      jobId,
+      preview?.relation.toTable,
+      preview?.sourceId,
+    ],
+    enabled: !!preview && !!jobId,
+    queryFn: async () => {
+      if (!preview || !jobId) return null;
+      const url = new URL(
+        `/api/projects/${projectId}/staging/lookup`,
+        window.location.origin,
+      );
+      url.searchParams.set("table", preview.relation.toTable);
+      url.searchParams.set("sourceId", String(preview.sourceId));
+      url.searchParams.set("jobId", String(jobId));
+      const r = await fetch(url.toString());
+      if (!r.ok) throw new Error(await r.text());
+      return ((await r.json()) as { record: StagedRecord | null }).record;
+    },
+  });
+
+  const record = previewQuery.data;
+  const data = (record?.stagedData as Record<string, unknown> | undefined) ?? null;
+
+  // Show "summary" fields first (name, code, etc.), then the rest.
+  const summaryKeys = [
+    "id",
+    "display_name",
+    "name",
+    "code",
+    "ref",
+    "complete_name",
+    "active",
+  ];
+  const dataKeys = data ? Object.keys(data) : [];
+  const ordered = [
+    ...summaryKeys.filter((k) => dataKeys.includes(k)),
+    ...dataKeys.filter((k) => !summaryKeys.includes(k)),
+  ];
+
+  return (
+    <Dialog open={preview !== null} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="flex max-h-[80vh] max-w-2xl flex-col gap-0 p-0">
+        <DialogHeader className="border-b p-6 pb-4">
+          <DialogTitle>
+            {preview && (
+              <>
+                <span className="font-mono">{preview.relation.toTable}</span>
+                <span className="ml-2 text-sm font-normal text-muted-foreground">
+                  #{preview.sourceId}
+                </span>
+              </>
+            )}
+          </DialogTitle>
+          <DialogDescription>
+            {preview && (
+              <>
+                Referenced from{" "}
+                <span className="font-mono">
+                  {preview.relation.fromTable}.{preview.relation.fromColumn}
+                </span>
+              </>
+            )}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex-1 overflow-y-auto p-6">
+          {previewQuery.isLoading ? (
+            <div className="flex justify-center py-8">
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            </div>
+          ) : previewQuery.error ? (
+            <p className="text-sm text-red-700">
+              {(previewQuery.error as Error).message}
+            </p>
+          ) : !record ? (
+            <p className="text-sm text-muted-foreground">
+              Parent record not found in this extraction. It may live in the
+              built-in target DB or be missing from the source data.
+            </p>
+          ) : data ? (
+            <dl className="grid grid-cols-[160px_1fr] gap-x-3 gap-y-1.5 text-xs">
+              {ordered.map((k) => (
+                <React.Fragment key={k}>
+                  <dt className="font-mono text-muted-foreground">{k}</dt>
+                  <dd className="break-all font-mono">
+                    {renderCell(data[k])}
+                  </dd>
+                </React.Fragment>
+              ))}
+            </dl>
+          ) : null}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function InspectBody({
   record,
   onSave,
   isSaving,
+  getFk,
+  onPreviewFk,
 }: {
   record: StagedRecord;
   onSave: (next: Record<string, unknown>) => void;
   isSaving: boolean;
+  getFk: (column: string) => RelationDefinition | null;
+  onPreviewFk: (relation: RelationDefinition, sourceId: number) => void;
 }) {
   const [draft, setDraft] = useState(record.stagedData);
   return (
-    <div className="space-y-3">
-      <SplitViewEditor
-        sourceData={record.sourceData}
-        stagedData={draft}
-        onChange={(next) => setDraft(next)}
-        onReset={() => setDraft(record.sourceData)}
-      />
-      <DialogFooter>
+    <>
+      <div className="flex-1 overflow-y-auto px-6 py-4">
+        <SplitViewEditor
+          sourceData={record.sourceData}
+          stagedData={draft}
+          onChange={(next) => setDraft(next)}
+          onReset={() => setDraft(record.sourceData)}
+          getFk={getFk}
+          onPreviewFk={onPreviewFk}
+        />
+      </div>
+      <DialogFooter className="border-t p-4">
         <Button onClick={() => onSave(draft)} disabled={isSaving}>
           {isSaving && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
           Save changes
         </Button>
       </DialogFooter>
-    </div>
+    </>
   );
 }
 
@@ -707,7 +1141,7 @@ function ColumnPickerDialog({
   }, [open, selected]);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className="max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Visible columns</DialogTitle>
           <DialogDescription>Pick which columns appear in the table.</DialogDescription>
@@ -808,7 +1242,7 @@ function BulkOperationDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl">
+      <DialogContent className="max-h-[90vh] max-w-xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Bulk operations</DialogTitle>
           <DialogDescription>

@@ -75,6 +75,10 @@ export default function ValidatePage({
       const r = await fetch(
         `/api/projects/${projectId}/validate/summary?jobId=${activeJobId}`,
       );
+      if (!r.ok) {
+        setActiveJob(null);
+        return [] as ValidationSummary[];
+      }
       return ((await r.json()) as { summary: ValidationSummary[] }).summary;
     },
   });

@@ -105,6 +105,7 @@ export const extractionJobs = pgTable("extraction_jobs", {
   totalTables: integer("total_tables").default(0).notNull(),
   totalRecords: integer("total_records").default(0).notNull(),
   errorMessage: text("error_message"),
+  cancelRequested: boolean("cancel_requested").default(false).notNull(),
 });
 
 export const stagedRecords = pgTable(

@@ -76,6 +76,10 @@ export default function ImportPage({
       const r = await fetch(
         `/api/projects/${projectId}/import/summary?jobId=${activeJobId}`,
       );
+      if (!r.ok) {
+        setActiveJob(null);
+        return [] as ImportSummary[];
+      }
       return ((await r.json()) as { summary: ImportSummary[] }).summary;
     },
   });

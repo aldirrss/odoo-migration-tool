@@ -15,7 +15,11 @@
       "Bash(PGPASSWORD=postgres createdb -h localhost -U postgres odoo_migration_staging)",
       "Bash(PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c \"SELECT pg_terminate_backend\\(pid\\) FROM pg_stat_activity WHERE datname='odoo_migration_staging' AND pid <> pg_backend_pid\\(\\);\")",
       "Bash(PGPASSWORD=postgres psql -h localhost -U postgres -d odoo_migration_staging -c \"\\\\dt\")",
-      "Bash(curl -s http://localhost:3000/api/auth/status)"
+      "Bash(curl -s http://localhost:3000/api/auth/status)",
+      "Bash(PGPASSWORD=postgres psql -h localhost -U postgres -d odoo_migration_staging -c \"\\\\d discovered_tables\")",
+      "Bash(PGPASSWORD=postgres psql -h localhost -U postgres -d odoo_migration_staging -c \"\\\\d discovered_modules\")",
+      "Bash(PGPASSWORD=postgres psql -h localhost -U postgres -d odoo_migration_staging -c \"\\\\d discovered_relations\")",
+      "Bash(grep -n \"fkByColumn=\\\\|fkByColumn$\" 'app/projects/[id]/staging/[table]/page.tsx')"
     ]
   }
 }

@@ -65,12 +65,16 @@ export default function ProjectsPage() {
     },
   });
 
+  const [pendingDeleteId, setPendingDeleteId] = useState<number | null>(null);
+
   const deleteMutation = useMutation({
     mutationFn: async (id: number) => {
+      setPendingDeleteId(id);
       const r = await fetch(`/api/projects/${id}`, { method: "DELETE" });
       if (!r.ok) throw new Error(await r.text());
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["projects"] }),
+    onSettled: () => setPendingDeleteId(null),
   });
 
   return (
@@ -109,13 +113,18 @@ export default function ProjectsPage() {
               <Button
                 size="sm"
                 variant="outline"
+                disabled={pendingDeleteId === p.id}
                 onClick={() => {
                   if (confirm(`Delete project "${p.name}"? This will remove all extraction data.`)) {
                     deleteMutation.mutate(p.id);
                   }
                 }}
               >
-                <Trash2 className="h-3 w-3" />
+                {pendingDeleteId === p.id ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Trash2 className="h-3 w-3" />
+                )}
               </Button>
             </CardFooter>
           </Card>

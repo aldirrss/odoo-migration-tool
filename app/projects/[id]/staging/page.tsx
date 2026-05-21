@@ -62,6 +62,10 @@ export default function StagingPage({
       const r = await fetch(
         `/api/projects/${projectId}/staging/stats?jobId=${activeJobId}`,
       );
+      if (!r.ok) {
+        setActiveJob(null);
+        return [] as TableStat[];
+      }
       return ((await r.json()) as { stats: TableStat[] }).stats;
     },
   });

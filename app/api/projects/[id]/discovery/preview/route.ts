@@ -1,12 +1,15 @@
 import { NextResponse } from "next/server";
 import { requireProjectAccess, httpErrorResponse } from "@/lib/auth/guards";
 import { getProfile } from "@/lib/db/profiles";
-import { runDiscovery } from "@/lib/migration/discovery";
+import { previewDiscovery } from "@/lib/migration/discovery";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 30;
+export const maxDuration = 15;
 
-export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
+export async function GET(
+  req: Request,
+  ctx: { params: Promise<{ id: string }> },
+) {
   try {
     const { id } = await ctx.params;
     const projectId = Number(id);
@@ -19,10 +22,13 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     }
     const source = await getProfile(project.sourceProfileId);
     if (!source) {
-      return NextResponse.json({ error: "Source profile not found" }, { status: 404 });
+      return NextResponse.json(
+        { error: "Source profile not found" },
+        { status: 404 },
+      );
     }
-    const result = await runDiscovery(projectId, source);
-    return NextResponse.json(result);
+    const summary = await previewDiscovery(source);
+    return NextResponse.json(summary);
   } catch (err) {
     return httpErrorResponse(err);
   }

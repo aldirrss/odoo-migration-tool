@@ -74,6 +74,17 @@ export default function DiscoveryPage({
     tablesDiscovered: number;
     relationsDiscovered: number;
   } | null>(null);
+  const [previewState, setPreviewState] = React.useState<
+    | { phase: "idle" }
+    | { phase: "loading" }
+    | {
+        phase: "ready";
+        installedModules: number;
+        candidateModels: number;
+      }
+    | { phase: "error"; message: string }
+  >({ phase: "idle" });
+  const [scanStartedAt, setScanStartedAt] = React.useState<number | null>(null);
 
   const dataQuery = useQuery({
     queryKey: ["discovery", projectId],
@@ -86,6 +97,7 @@ export default function DiscoveryPage({
 
   const scan = useMutation({
     mutationFn: async () => {
+      setScanStartedAt(Date.now());
       const r = await fetch(`/api/projects/${projectId}/discovery/scan`, {
         method: "POST",
       });
@@ -105,7 +117,32 @@ export default function DiscoveryPage({
       setScanError(err instanceof Error ? err.message : String(err));
       setScanResult(null);
     },
+    onSettled: () => {
+      setScanStartedAt(null);
+    },
   });
+
+  const loadPreview = async () => {
+    setPreviewState({ phase: "loading" });
+    try {
+      const r = await fetch(`/api/projects/${projectId}/discovery/preview`);
+      if (!r.ok) throw new Error(await r.text());
+      const data = (await r.json()) as {
+        installedModules: number;
+        candidateModels: number;
+      };
+      setPreviewState({
+        phase: "ready",
+        installedModules: data.installedModules,
+        candidateModels: data.candidateModels,
+      });
+    } catch (err) {
+      setPreviewState({
+        phase: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
 
   const moduleMutation = useMutation({
     mutationFn: async ({ moduleId, enabled }: { moduleId: number; enabled: boolean }) => {
@@ -217,24 +254,55 @@ export default function DiscoveryPage({
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="flex items-center gap-3">
-            <Button onClick={() => scan.mutate()} disabled={scan.isPending}>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button
+              variant="outline"
+              onClick={loadPreview}
+              disabled={previewState.phase === "loading"}
+            >
+              {previewState.phase === "loading" ? "Checking..." : "Check size first"}
+            </Button>
+            <Button
+              onClick={() => scan.mutate()}
+              disabled={scan.isPending}
+            >
               <Search className="mr-2 h-4 w-4" />
               {scan.isPending ? "Scanning..." : "Scan source DB"}
             </Button>
-            {scanResult && (
-              <span className="text-sm text-green-700">
-                Discovered {scanResult.modulesDiscovered} modules,{" "}
-                {scanResult.tablesDiscovered} tables,{" "}
-                {scanResult.relationsDiscovered} relations.
-              </span>
-            )}
-            {scanError && (
-              <span className="text-sm text-red-700">{scanError}</span>
+            {scan.isPending && scanStartedAt && (
+              <ElapsedTimer startedAt={scanStartedAt} />
             )}
           </div>
+
+          {previewState.phase === "ready" && (
+            <p className="text-sm text-muted-foreground">
+              Source DB has{" "}
+              <strong>{previewState.installedModules}</strong> installed module
+              {previewState.installedModules === 1 ? "" : "s"} and{" "}
+              <strong>{previewState.candidateModels}</strong> candidate model
+              {previewState.candidateModels === 1 ? "" : "s"}. Built-in tables
+              (base / accounting / pos) will be skipped during the scan.
+            </p>
+          )}
+          {previewState.phase === "error" && (
+            <p className="text-sm text-red-700">
+              Preview failed: {previewState.message}
+            </p>
+          )}
+
+          {scanResult && (
+            <p className="text-sm text-green-700">
+              Discovered {scanResult.modulesDiscovered} new modules,{" "}
+              {scanResult.tablesDiscovered} new tables,{" "}
+              {scanResult.relationsDiscovered} new relations.
+            </p>
+          )}
+          {scanError && <p className="text-sm text-red-700">{scanError}</p>}
+
           <p className="text-xs text-muted-foreground">
-            Scanning runs synchronously and typically takes &lt; 30s on small Odoo DBs.
+            Scanning reads <code>ir_module_module</code>, <code>ir_model</code>,
+            and <code>pg_catalog</code> in bulk. Typical runtime: a few seconds
+            even for large Odoo databases.
           </p>
         </CardContent>
       </Card>
@@ -343,6 +411,17 @@ export default function DiscoveryPage({
       )}
     </div>
   );
+}
+
+function ElapsedTimer({ startedAt }: { startedAt: number }) {
+  const [elapsed, setElapsed] = React.useState(0);
+  React.useEffect(() => {
+    const tick = () => setElapsed(Math.floor((Date.now() - startedAt) / 1000));
+    tick();
+    const id = setInterval(tick, 500);
+    return () => clearInterval(id);
+  }, [startedAt]);
+  return <span className="text-sm text-muted-foreground">{elapsed}s elapsed</span>;
 }
 
 function TableRow({
