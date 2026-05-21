@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs -0 -I {} sh -c 'echo \"===== {} =====\"; cat \"{}\"')",
+      "mcp__session__session_create",
+      "Bash(curl -sv http://localhost:3000/api/auth/status)",
+      "Bash(grep -v \"^$\")",
+      "Bash(psql postgresql://postgres:postgres@localhost:5432/odoo_migration_staging -c \"\\\\dt\")",
+      "Bash(psql postgresql://postgres:postgres@localhost:5432/odoo_migration_staging -c \"SELECT * FROM __drizzle_migrations ORDER BY id;\")",
+      "Bash(psql postgresql://postgres:postgres@localhost:5432/odoo_migration_staging -c \"SELECT count\\(*\\) FROM extraction_jobs;\")",
+      "Bash(psql postgresql://postgres:postgres@localhost:5432/odoo_migration_staging -c \"SELECT count\\(*\\) FROM staged_records;\")",
+      "Bash(dropdb odoo_migration_staging)",
+      "Bash(createdb odoo_migration_staging)",
+      "Bash(PGPASSWORD=postgres dropdb -h localhost -U postgres odoo_migration_staging)",
+      "Bash(PGPASSWORD=postgres createdb -h localhost -U postgres odoo_migration_staging)",
+      "Bash(PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c \"SELECT pg_terminate_backend\\(pid\\) FROM pg_stat_activity WHERE datname='odoo_migration_staging' AND pid <> pg_backend_pid\\(\\);\")",
+      "Bash(PGPASSWORD=postgres psql -h localhost -U postgres -d odoo_migration_staging -c \"\\\\dt\")",
+      "Bash(curl -s http://localhost:3000/api/auth/status)"
+    ]
+  }
+}

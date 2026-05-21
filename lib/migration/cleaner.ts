@@ -5,7 +5,7 @@
  * leaving `source_data` immutable as a reference copy.
  */
 
-import { and, eq, sql, asc, desc, like } from "drizzle-orm";
+import { and, eq, inArray, sql, asc, desc, like } from "drizzle-orm";
 import { stagingDb, schema } from "../db/staging";
 import {
   getIncomingRelations,
@@ -22,6 +22,7 @@ export interface ListStagedRecordsOptions {
   search?: string;
   filterDirty?: boolean;
   filterDeleted?: boolean;
+  filterValidationStatus?: string;
   orderBy?: "source_id" | "updated_at";
   orderDir?: "asc" | "desc";
 }
@@ -44,6 +45,7 @@ export async function listStagedRecords(
     search,
     filterDirty,
     filterDeleted,
+    filterValidationStatus,
     orderBy = "source_id",
     orderDir = "asc",
   } = options;
@@ -56,6 +58,9 @@ export async function listStagedRecords(
   if (filterDirty) filters.push(eq(schema.stagedRecords.isDirty, true));
   if (filterDeleted !== undefined) {
     filters.push(eq(schema.stagedRecords.isDeleted, filterDeleted));
+  }
+  if (filterValidationStatus) {
+    filters.push(eq(schema.stagedRecords.validationStatus, filterValidationStatus));
   }
 
   if (search) {
@@ -154,18 +159,12 @@ export async function softDeleteStagedRecord(
   const record = await getStagedRecord(id);
   if (!record) return { ok: false, message: "Record not found" };
 
-  const impacts = await computeDependencyImpact(
-    record.extractionJobId,
-    record.tableName,
-    record.sourceId,
-  );
-
-  const blocking = impacts.filter((i) => i.action === "block" && i.dependentCount > 0);
-  if (blocking.length > 0 && !force) {
+  const check = await canSoftDelete(record);
+  if (!check.ok && !force) {
     return {
       ok: false,
-      message: "Deletion blocked: active dependencies exist",
-      blocking,
+      message: check.message,
+      blocking: check.blocking,
     };
   }
 
@@ -175,6 +174,27 @@ export async function softDeleteStagedRecord(
     .where(eq(schema.stagedRecords.id, id));
 
   return { ok: true };
+}
+
+/**
+ * Inspect a staged record's dependency graph and decide whether it can be
+ * soft-deleted without violating an `onDelete: "block"` relation.
+ */
+export async function canSoftDelete(
+  record: typeof schema.stagedRecords.$inferSelect,
+): Promise<{ ok: true } | { ok: false; message: string; blocking: RelationImpact[] }> {
+  const impacts = await computeDependencyImpact(
+    record.extractionJobId,
+    record.tableName,
+    record.sourceId,
+  );
+  const blocking = impacts.filter((i) => i.action === "block" && i.dependentCount > 0);
+  if (blocking.length === 0) return { ok: true };
+  return {
+    ok: false,
+    message: "Deletion blocked: active dependencies exist",
+    blocking,
+  };
 }
 
 export interface RelationImpact {
@@ -261,3 +281,275 @@ function shallowEqual(a: Record<string, unknown>, b: Record<string, unknown>): b
 
 // Re-export helper for UI
 export { findTable, getIncomingRelations, getOutgoingRelations };
+
+export interface ListStagedRecordIdsOptions {
+  jobId: number;
+  tableName: string;
+  search?: string;
+  filterDirty?: boolean;
+  filterDeleted?: boolean;
+  filterValidationStatus?: string;
+}
+
+/** Lightweight: return just IDs matching a filter, used by "select all". */
+export async function listStagedRecordIds(
+  options: ListStagedRecordIdsOptions,
+): Promise<number[]> {
+  const filters = [
+    eq(schema.stagedRecords.extractionJobId, options.jobId),
+    eq(schema.stagedRecords.tableName, options.tableName),
+  ];
+  if (options.filterDirty) filters.push(eq(schema.stagedRecords.isDirty, true));
+  if (options.filterDeleted !== undefined) {
+    filters.push(eq(schema.stagedRecords.isDeleted, options.filterDeleted));
+  }
+  if (options.filterValidationStatus) {
+    filters.push(eq(schema.stagedRecords.validationStatus, options.filterValidationStatus));
+  }
+  if (options.search) {
+    filters.push(
+      like(sql`${schema.stagedRecords.stagedData}::text`, `%${options.search}%`),
+    );
+  }
+  const rows = await stagingDb
+    .select({ id: schema.stagedRecords.id })
+    .from(schema.stagedRecords)
+    .where(and(...filters));
+  return rows.map((r) => r.id);
+}
+
+// ---------- Bulk operations ----------
+
+export type BulkOperation =
+  | { kind: "set_field"; column: string; value: unknown }
+  | {
+      kind: "find_replace";
+      column: string | null;
+      find: string;
+      replace: string;
+      useRegex: boolean;
+    }
+  | { kind: "clear_field"; column: string }
+  | { kind: "revert_to_source" }
+  | { kind: "soft_delete" }
+  | { kind: "restore" };
+
+export interface BulkResult {
+  totalRequested: number;
+  successCount: number;
+  failedCount: number;
+  failures: Array<{ recordId: number; sourceId: number; reason: string }>;
+}
+
+const BULK_CHUNK_SIZE = 500;
+
+/**
+ * Apply a bulk operation to many staged records for a single project+table.
+ * Processes in chunks of 500 records per transaction.
+ */
+export async function applyBulkOperation(
+  projectId: number,
+  tableName: string,
+  recordIds: number[],
+  op: BulkOperation,
+): Promise<BulkResult> {
+  const result: BulkResult = {
+    totalRequested: recordIds.length,
+    successCount: 0,
+    failedCount: 0,
+    failures: [],
+  };
+  if (recordIds.length === 0) return result;
+
+  // Load + scope-check all records up front
+  const ownedRows = await stagingDb
+    .select({
+      record: schema.stagedRecords,
+      jobProjectId: schema.extractionJobs.projectId,
+    })
+    .from(schema.stagedRecords)
+    .innerJoin(
+      schema.extractionJobs,
+      eq(schema.extractionJobs.id, schema.stagedRecords.extractionJobId),
+    )
+    .where(inArray(schema.stagedRecords.id, recordIds));
+
+  const ownedMap = new Map<number, typeof schema.stagedRecords.$inferSelect>();
+  for (const row of ownedRows) {
+    if (row.jobProjectId !== projectId) continue;
+    if (row.record.tableName !== tableName) continue;
+    ownedMap.set(row.record.id, row.record);
+  }
+
+  for (const id of recordIds) {
+    if (!ownedMap.has(id)) {
+      result.failures.push({
+        recordId: id,
+        sourceId: 0,
+        reason: "Record not found or not in project/table scope",
+      });
+      result.failedCount++;
+    }
+  }
+
+  const eligible = recordIds.filter((id) => ownedMap.has(id));
+
+  // For soft_delete, pre-compute which records pass the dependency check
+  const blockedDeletes = new Map<number, string>();
+  if (op.kind === "soft_delete") {
+    for (const id of eligible) {
+      const rec = ownedMap.get(id)!;
+      const check = await canSoftDelete(rec);
+      if (!check.ok) {
+        const labels = check.blocking
+          .map((b) => `${b.fromTable}.${b.fromColumn} (${b.dependentCount})`)
+          .join(", ");
+        blockedDeletes.set(id, `Blocked by: ${labels}`);
+      }
+    }
+  }
+
+  // Build the applicable list, recording failures for blocked deletes
+  const applicable: number[] = [];
+  for (const id of eligible) {
+    if (op.kind === "soft_delete" && blockedDeletes.has(id)) {
+      const rec = ownedMap.get(id)!;
+      result.failures.push({
+        recordId: id,
+        sourceId: rec.sourceId,
+        reason: blockedDeletes.get(id)!,
+      });
+      result.failedCount++;
+      continue;
+    }
+    applicable.push(id);
+  }
+
+  // Process applicable IDs in chunks
+  for (let i = 0; i < applicable.length; i += BULK_CHUNK_SIZE) {
+    const chunk = applicable.slice(i, i + BULK_CHUNK_SIZE);
+    try {
+      await stagingDb.transaction(async (tx) => {
+        for (const id of chunk) {
+          const rec = ownedMap.get(id)!;
+          await applyOperationToRecord(tx, rec, op);
+        }
+      });
+      for (const id of chunk) {
+        result.successCount++;
+        // keep cached ownedMap unchanged; per-record updates already committed
+        void id;
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      for (const id of chunk) {
+        const rec = ownedMap.get(id)!;
+        result.failures.push({ recordId: id, sourceId: rec.sourceId, reason: message });
+        result.failedCount++;
+      }
+    }
+  }
+
+  return result;
+}
+
+async function applyOperationToRecord(
+  tx: Parameters<Parameters<typeof stagingDb.transaction>[0]>[0],
+  record: typeof schema.stagedRecords.$inferSelect,
+  op: BulkOperation,
+): Promise<void> {
+  const now = new Date();
+  switch (op.kind) {
+    case "set_field": {
+      const next = { ...(record.stagedData as Record<string, unknown>), [op.column]: op.value };
+      const isDirty = !recordsEqual(record.sourceData as Record<string, unknown>, next);
+      await tx
+        .update(schema.stagedRecords)
+        .set({
+          stagedData: next,
+          isDirty,
+          updatedAt: now,
+          validationStatus: "pending",
+        })
+        .where(eq(schema.stagedRecords.id, record.id));
+      return;
+    }
+    case "clear_field": {
+      const next = { ...(record.stagedData as Record<string, unknown>), [op.column]: null };
+      const isDirty = !recordsEqual(record.sourceData as Record<string, unknown>, next);
+      await tx
+        .update(schema.stagedRecords)
+        .set({
+          stagedData: next,
+          isDirty,
+          updatedAt: now,
+          validationStatus: "pending",
+        })
+        .where(eq(schema.stagedRecords.id, record.id));
+      return;
+    }
+    case "find_replace": {
+      const staged = { ...(record.stagedData as Record<string, unknown>) };
+      let anyChange = false;
+      const columns = op.column ? [op.column] : Object.keys(staged);
+      const matcher = op.useRegex ? new RegExp(op.find, "g") : null;
+      for (const col of columns) {
+        const v = staged[col];
+        if (typeof v !== "string") continue;
+        let nextStr: string;
+        if (matcher) {
+          nextStr = v.replace(matcher, op.replace);
+        } else {
+          nextStr = v.split(op.find).join(op.replace);
+        }
+        if (nextStr !== v) {
+          staged[col] = nextStr;
+          anyChange = true;
+        }
+      }
+      if (!anyChange) return;
+      const isDirty = !recordsEqual(record.sourceData as Record<string, unknown>, staged);
+      await tx
+        .update(schema.stagedRecords)
+        .set({
+          stagedData: staged,
+          isDirty,
+          updatedAt: now,
+          validationStatus: "pending",
+        })
+        .where(eq(schema.stagedRecords.id, record.id));
+      return;
+    }
+    case "revert_to_source": {
+      await tx
+        .update(schema.stagedRecords)
+        .set({
+          stagedData: record.sourceData,
+          isDirty: false,
+          isDeleted: false,
+          validationStatus: "pending",
+          updatedAt: now,
+        })
+        .where(eq(schema.stagedRecords.id, record.id));
+      return;
+    }
+    case "soft_delete": {
+      await tx
+        .update(schema.stagedRecords)
+        .set({ isDeleted: true, isDirty: true, updatedAt: now })
+        .where(eq(schema.stagedRecords.id, record.id));
+      return;
+    }
+    case "restore": {
+      await tx
+        .update(schema.stagedRecords)
+        .set({ isDeleted: false, updatedAt: now })
+        .where(eq(schema.stagedRecords.id, record.id));
+      return;
+    }
+  }
+}
+
+function recordsEqual(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  return shallowEqual(a, b);
+}

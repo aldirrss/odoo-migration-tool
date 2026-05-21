@@ -16,7 +16,7 @@ import { sql, eq, and, asc } from "drizzle-orm";
 import { stagingDb, schema } from "../db/staging";
 import { getTargetPool } from "../db/target";
 import type { ConnectionProfile } from "../db/profiles";
-import { getAllTables } from "../odoo/modules";
+import { getAllTables } from "../odoo/modules/project-scope";
 import type { TableDefinition } from "../odoo/types";
 
 export interface ImportProgress {
@@ -29,6 +29,7 @@ export interface ImportProgress {
 }
 
 export async function runImport(
+  projectId: number,
   jobId: number,
   targetProfile: ConnectionProfile,
   options: { skipFailedValidation?: boolean } = {},
@@ -44,13 +45,14 @@ export async function runImport(
   const [importJob] = await stagingDb
     .insert(schema.importJobs)
     .values({
+      projectId,
       extractionJobId: jobId,
       status: "running",
     })
     .returning();
   if (!importJob) throw new Error("Failed to create import job");
 
-  const tables = getAllTables();
+  const tables = await getAllTables(projectId);
   const pool = getTargetPool(targetProfile);
 
   let totalRecords = 0;
@@ -267,10 +269,12 @@ export async function getImportSummary(jobId: number) {
   }>;
 }
 
-export async function getLatestImportJob() {
-  const rows = await stagingDb
-    .select()
-    .from(schema.importJobs)
+export async function getLatestImportJob(projectId?: number) {
+  const query = stagingDb.select().from(schema.importJobs);
+  const filtered = projectId != null
+    ? query.where(eq(schema.importJobs.projectId, projectId))
+    : query;
+  const rows = await filtered
     .orderBy(sql`${schema.importJobs.startedAt} DESC`)
     .limit(1);
   return rows[0] ?? null;

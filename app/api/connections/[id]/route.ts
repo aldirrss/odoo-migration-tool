@@ -1,20 +1,19 @@
 import { NextResponse } from "next/server";
 import { deleteProfile } from "@/lib/db/profiles";
+import { requireSession, httpErrorResponse } from "@/lib/auth/guards";
 
 export const dynamic = "force-dynamic";
 
 export async function DELETE(
-  _req: Request,
+  req: Request,
   context: { params: Promise<{ id: string }> },
 ) {
   try {
+    await requireSession(req);
     const { id } = await context.params;
     const ok = await deleteProfile(id);
     return NextResponse.json({ deleted: ok });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status: 500 },
-    );
+    return httpErrorResponse(err);
   }
 }

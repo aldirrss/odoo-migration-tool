@@ -15,7 +15,8 @@ import { sql, eq, and } from "drizzle-orm";
 import { stagingDb, schema } from "../db/staging";
 import { getTargetPool } from "../db/target";
 import type { ConnectionProfile } from "../db/profiles";
-import { getAllTables, getOutgoingRelations } from "../odoo/modules";
+import { getOutgoingRelations } from "../odoo/modules";
+import { getAllTables } from "../odoo/modules/project-scope";
 
 export interface ValidationMessage {
   field?: string;
@@ -34,9 +35,10 @@ export interface ValidationProgress {
 export async function runValidation(
   jobId: number,
   targetProfile: ConnectionProfile,
+  projectId: number,
   onProgress?: (p: ValidationProgress) => void,
 ): Promise<ValidationProgress[]> {
-  const tables = getAllTables();
+  const tables = await getAllTables(projectId);
   const targetPool = getTargetPool(targetProfile);
   const results: ValidationProgress[] = [];
 

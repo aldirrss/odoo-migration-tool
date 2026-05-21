@@ -4,6 +4,7 @@ A Next.js 14 + TypeScript web application for migrating data from a legacy Odoo 
 
 ## Features
 
+- **Multi-user with projects:** Local auth (email + password); each migration lives inside a project. Admins see everything, users see their own.
 - **5-step guided workflow:** Connections → Extract → Clean → Validate → Import
 - **Extensible module registry:** Built-in support for Base, Accounting, and POS — easily add custom modules
 - **Split-view editor:** Side-by-side comparison of source vs. cleaned data with field-level diff highlighting
@@ -51,9 +52,13 @@ npm run db:migrate
 npm run dev
 ```
 
-Then open <http://localhost:3000>.
+Then open <http://localhost:3000> and register the first user — they are auto-promoted to **admin**. Subsequent registrations are admin-only.
+
+> **Upgrading from Phase 1?** Phase 2 drops the file-based profile store (`config/connections.json`) and introduces user accounts and projects. All Phase 1 data is dropped. Reset your staging DB (`dropdb odoo_migration_staging && createdb odoo_migration_staging`), delete `config/connections.json` if present, then re-run `db:generate` + `db:migrate`. You will lose all extraction state and connection profiles — re-enter them after registering.
 
 ## Workflow
+
+Sign in, then open `/projects` and create a new project. Every step below happens inside a project at `/projects/<id>/<step>`.
 
 ### 1. Connections
 Add at least one **source** profile (your legacy Odoo 16 DB) and one **target** profile (the fresh Odoo DB). Use the "Test connection" button to verify before saving.

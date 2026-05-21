@@ -8,6 +8,10 @@
  *   3. Import and push it to the `moduleRegistry` array below
  *
  * No changes to core extract/clean/import logic are needed.
+ *
+ * Helpers in this file are SYNCHRONOUS and have no DB dependency, so they are
+ * safe to import in client components. Project-scoped async helpers that
+ * consult `project_configs.allowed_modules` live in `./project-scope.ts`.
  */
 
 import type {
@@ -26,20 +30,20 @@ export const moduleRegistry: OdooModule[] = [
   // Add custom modules here
 ];
 
-/** Get all tables across every module, sorted by importOrder ascending. */
-export function getAllTables(): TableDefinition[] {
+/** Synchronous: every built-in table, no project filter. */
+export function getAllTablesSync(): TableDefinition[] {
   const tables = moduleRegistry.flatMap((m) => m.tables);
   return tables.sort((a, b) => (a.importOrder ?? 100) - (b.importOrder ?? 100));
 }
 
-/** Get all relations across every module. */
-export function getAllRelations(): RelationDefinition[] {
+/** Synchronous: every built-in relation, no project filter. */
+export function getAllRelationsSync(): RelationDefinition[] {
   return moduleRegistry.flatMap((m) => m.relations);
 }
 
-/** Find a table definition by its PostgreSQL table name. */
+/** Find a table definition by its PostgreSQL table name (built-in registry only). */
 export function findTable(tableName: string): TableDefinition | undefined {
-  return getAllTables().find((t) => t.tableName === tableName);
+  return getAllTablesSync().find((t) => t.tableName === tableName);
 }
 
 /** Find a module by its name. */
@@ -49,10 +53,11 @@ export function findModule(name: string): OdooModule | undefined {
 
 /** Get all relations that reference a given table as the PARENT (toTable). */
 export function getIncomingRelations(tableName: string): RelationDefinition[] {
-  return getAllRelations().filter((r) => r.toTable === tableName);
+  return getAllRelationsSync().filter((r) => r.toTable === tableName);
 }
 
 /** Get all relations where a given table is the CHILD (fromTable). */
 export function getOutgoingRelations(tableName: string): RelationDefinition[] {
-  return getAllRelations().filter((r) => r.fromTable === tableName);
+  return getAllRelationsSync().filter((r) => r.fromTable === tableName);
 }
+

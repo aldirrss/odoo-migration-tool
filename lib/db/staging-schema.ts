@@ -1,14 +1,15 @@
 /**
  * Staging database schema (Drizzle ORM).
  *
- * The staging DB holds three types of state:
- *   1. extraction_jobs       - audit log of extraction runs
- *   2. staged_records        - the actual extracted rows (one row per Odoo record)
- *   3. import_jobs           - audit log of import runs
+ * The staging DB holds:
+ *   1. users / sessions                  - auth
+ *   2. connection_profiles               - PostgreSQL connection profiles (encrypted password)
+ *   3. projects / project_configs        - per-project workspace + configuration
+ *   4. extraction_jobs / staged_records  - extraction state, scoped to a project
+ *   5. import_jobs                       - import state, scoped to a project
  *
  * Each Odoo source table is stored row-by-row in `staged_records` using a JSONB
- * column for the raw data. This avoids having to generate hundreds of dynamic
- * schemas while still allowing query/edit by table name.
+ * column for the raw data.
  */
 
 import {
@@ -23,11 +24,82 @@ import {
   index,
 } from "drizzle-orm/pg-core";
 
+export const users = pgTable("users", {
+  id: serial("id").primaryKey(),
+  email: text("email").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  role: text("role").notNull().default("user"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  lastLoginAt: timestamp("last_login_at"),
+});
+
+export const sessions = pgTable("sessions", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id")
+    .references(() => users.id, { onDelete: "cascade" })
+    .notNull(),
+  tokenHash: text("token_hash").notNull().unique(),
+  expiresAt: timestamp("expires_at").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export const connectionProfiles = pgTable("connection_profiles", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  role: text("role").notNull(),
+  host: text("host").notNull(),
+  port: integer("port").notNull(),
+  database: text("database").notNull(),
+  user: text("user").notNull(),
+  encryptedPassword: text("encrypted_password").notNull(),
+  ssl: boolean("ssl").default(false).notNull(),
+  odooVersion: text("odoo_version"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const projects = pgTable("projects", {
+  id: serial("id").primaryKey(),
+  ownerId: integer("owner_id")
+    .references(() => users.id, { onDelete: "cascade" })
+    .notNull(),
+  name: text("name").notNull(),
+  sourceProfileId: text("source_profile_id").references(() => connectionProfiles.id, {
+    onDelete: "set null",
+  }),
+  targetProfileId: text("target_profile_id").references(() => connectionProfiles.id, {
+    onDelete: "set null",
+  }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const projectConfigs = pgTable("project_configs", {
+  projectId: integer("project_id")
+    .primaryKey()
+    .references(() => projects.id, { onDelete: "cascade" }),
+  transactionDateFrom: text("transaction_date_from").notNull().default("2026-01-01"),
+  dateFallbackEnabled: boolean("date_fallback_enabled").default(true).notNull(),
+  dateFallbackChain: jsonb("date_fallback_chain")
+    .$type<string[]>()
+    .default(["date", "date_order", "create_date", "write_date"])
+    .notNull(),
+  allowedModules: jsonb("allowed_modules")
+    .$type<string[]>()
+    .default(["base", "accounting", "pos"])
+    .notNull(),
+  onMissingDateColumn: text("on_missing_date_column").default("fallback").notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
 export const extractionJobs = pgTable("extraction_jobs", {
   id: serial("id").primaryKey(),
+  projectId: integer("project_id")
+    .references(() => projects.id, { onDelete: "cascade" })
+    .notNull(),
   sourceProfileId: text("source_profile_id").notNull(),
   targetProfileId: text("target_profile_id").notNull(),
-  status: text("status").notNull().default("running"), // running | done | failed
+  status: text("status").notNull().default("running"),
   startedAt: timestamp("started_at").defaultNow().notNull(),
   finishedAt: timestamp("finished_at"),
   totalTables: integer("total_tables").default(0).notNull(),
@@ -42,15 +114,15 @@ export const stagedRecords = pgTable(
     extractionJobId: integer("extraction_job_id")
       .references(() => extractionJobs.id, { onDelete: "cascade" })
       .notNull(),
-    tableName: text("table_name").notNull(), // e.g. "res_partner"
-    sourceId: integer("source_id").notNull(), // original Odoo record id
-    sourceData: jsonb("source_data").notNull(), // immutable copy of source row
-    stagedData: jsonb("staged_data").notNull(), // editable copy
+    tableName: text("table_name").notNull(),
+    sourceId: integer("source_id").notNull(),
+    sourceData: jsonb("source_data").notNull(),
+    stagedData: jsonb("staged_data").notNull(),
     isDirty: boolean("is_dirty").default(false).notNull(),
     isDeleted: boolean("is_deleted").default(false).notNull(),
-    validationStatus: text("validation_status").default("pending").notNull(), // pending | pass | warning | fail
-    validationMessages: jsonb("validation_messages"), // array of {field, severity, message}
-    importStatus: text("import_status").default("pending").notNull(), // pending | success | error | skipped
+    validationStatus: text("validation_status").default("pending").notNull(),
+    validationMessages: jsonb("validation_messages"),
+    importStatus: text("import_status").default("pending").notNull(),
     importError: text("import_error"),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
   },
@@ -71,7 +143,7 @@ export const tableExtractionStatus = pgTable("table_extraction_status", {
     .references(() => extractionJobs.id, { onDelete: "cascade" })
     .notNull(),
   tableName: text("table_name").notNull(),
-  status: text("status").notNull().default("pending"), // pending | running | done | failed
+  status: text("status").notNull().default("pending"),
   recordCount: integer("record_count").default(0).notNull(),
   errorMessage: text("error_message"),
   startedAt: timestamp("started_at"),
@@ -80,6 +152,9 @@ export const tableExtractionStatus = pgTable("table_extraction_status", {
 
 export const importJobs = pgTable("import_jobs", {
   id: serial("id").primaryKey(),
+  projectId: integer("project_id")
+    .references(() => projects.id, { onDelete: "cascade" })
+    .notNull(),
   extractionJobId: integer("extraction_job_id")
     .references(() => extractionJobs.id, { onDelete: "cascade" })
     .notNull(),
@@ -92,6 +167,87 @@ export const importJobs = pgTable("import_jobs", {
   errorMessage: text("error_message"),
 });
 
+export const discoveredModules = pgTable(
+  "discovered_modules",
+  {
+    id: serial("id").primaryKey(),
+    projectId: integer("project_id")
+      .references(() => projects.id, { onDelete: "cascade" })
+      .notNull(),
+    name: text("name").notNull(),
+    label: text("label").notNull(),
+    installed: boolean("installed").default(true).notNull(),
+    discoveredAt: timestamp("discovered_at").defaultNow().notNull(),
+    enabled: boolean("enabled").default(false).notNull(),
+  },
+  (table) => ({
+    uniqueModule: uniqueIndex("discovered_modules_project_name_uq").on(
+      table.projectId,
+      table.name,
+    ),
+  }),
+);
+
+export const discoveredTables = pgTable(
+  "discovered_tables",
+  {
+    id: serial("id").primaryKey(),
+    projectId: integer("project_id")
+      .references(() => projects.id, { onDelete: "cascade" })
+      .notNull(),
+    moduleId: integer("module_id")
+      .references(() => discoveredModules.id, { onDelete: "cascade" })
+      .notNull(),
+    tableName: text("table_name").notNull(),
+    odooModel: text("odoo_model").notNull(),
+    type: text("type").notNull(),
+    dateFilterColumn: text("date_filter_column"),
+    importOrder: integer("import_order").default(500).notNull(),
+    columns: jsonb("columns")
+      .$type<Array<{ name: string; label: string; type: string }>>()
+      .notNull(),
+    confidence: text("confidence").notNull(),
+    userClassified: boolean("user_classified").default(false).notNull(),
+    enabled: boolean("enabled").default(false).notNull(),
+  },
+  (table) => ({
+    uniqueTable: uniqueIndex("discovered_tables_project_table_uq").on(
+      table.projectId,
+      table.tableName,
+    ),
+  }),
+);
+
+export const discoveredRelations = pgTable("discovered_relations", {
+  id: serial("id").primaryKey(),
+  projectId: integer("project_id")
+    .references(() => projects.id, { onDelete: "cascade" })
+    .notNull(),
+  fromTable: text("from_table").notNull(),
+  fromColumn: text("from_column").notNull(),
+  toTable: text("to_table").notNull(),
+  toColumn: text("to_column").notNull(),
+  onDelete: text("on_delete").notNull().default("block"),
+  source: text("source").notNull().default("introspect"),
+});
+
+export type DiscoveredModule = typeof discoveredModules.$inferSelect;
+export type NewDiscoveredModule = typeof discoveredModules.$inferInsert;
+export type DiscoveredTable = typeof discoveredTables.$inferSelect;
+export type NewDiscoveredTable = typeof discoveredTables.$inferInsert;
+export type DiscoveredRelation = typeof discoveredRelations.$inferSelect;
+export type NewDiscoveredRelation = typeof discoveredRelations.$inferInsert;
+
+export type User = typeof users.$inferSelect;
+export type NewUser = typeof users.$inferInsert;
+export type Session = typeof sessions.$inferSelect;
+export type NewSession = typeof sessions.$inferInsert;
+export type ConnectionProfileRow = typeof connectionProfiles.$inferSelect;
+export type NewConnectionProfileRow = typeof connectionProfiles.$inferInsert;
+export type Project = typeof projects.$inferSelect;
+export type NewProject = typeof projects.$inferInsert;
+export type ProjectConfig = typeof projectConfigs.$inferSelect;
+export type NewProjectConfig = typeof projectConfigs.$inferInsert;
 export type ExtractionJob = typeof extractionJobs.$inferSelect;
 export type NewExtractionJob = typeof extractionJobs.$inferInsert;
 export type StagedRecord = typeof stagedRecords.$inferSelect;

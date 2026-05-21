@@ -2,11 +2,13 @@ import { NextResponse } from "next/server";
 import { testSourceConnection } from "@/lib/db/source";
 import { getProfile } from "@/lib/db/profiles";
 import type { ConnectionProfile } from "@/lib/db/profiles";
+import { requireSession, httpErrorResponse } from "@/lib/auth/guards";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
   try {
+    await requireSession(req);
     const body = await req.json();
     // If editing an existing profile without password, reuse stored one
     let password: string = body.password;
@@ -31,6 +33,7 @@ export async function POST(req: Request) {
     const result = await testSourceConnection(profile);
     return NextResponse.json(result);
   } catch (err) {
+    if ((err as { status?: number }).status === 401) return httpErrorResponse(err);
     return NextResponse.json(
       { ok: false, message: err instanceof Error ? err.message : String(err) },
       { status: 200 },

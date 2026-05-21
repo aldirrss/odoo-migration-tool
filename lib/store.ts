@@ -1,17 +1,14 @@
-/**
- * Global client-side state for migration session.
- * Tracks selected source/target profiles and the active extraction job.
- */
-
 "use client";
 
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 interface MigrationState {
+  currentProjectId: number | null;
   sourceProfileId: string | null;
   targetProfileId: string | null;
   activeJobId: number | null;
+  setCurrentProject: (id: number | null) => void;
   setSourceProfile: (id: string | null) => void;
   setTargetProfile: (id: string | null) => void;
   setActiveJob: (id: number | null) => void;
@@ -21,14 +18,17 @@ interface MigrationState {
 export const useMigrationStore = create<MigrationState>()(
   persist(
     (set) => ({
+      currentProjectId: null,
       sourceProfileId: null,
       targetProfileId: null,
       activeJobId: null,
+      setCurrentProject: (id) => set({ currentProjectId: id }),
       setSourceProfile: (id) => set({ sourceProfileId: id }),
       setTargetProfile: (id) => set({ targetProfileId: id }),
       setActiveJob: (id) => set({ activeJobId: id }),
       reset: () =>
         set({
+          currentProjectId: null,
           sourceProfileId: null,
           targetProfileId: null,
           activeJobId: null,

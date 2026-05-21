@@ -13,34 +13,41 @@ export type MigrationStep =
 interface StepDescriptor {
   id: MigrationStep;
   label: string;
-  href: string;
+  path: string;
 }
 
 const STEPS: StepDescriptor[] = [
-  { id: "connections", label: "Connections", href: "/connections" },
-  { id: "extract", label: "Extract", href: "/extract" },
-  { id: "clean", label: "Clean", href: "/staging" },
-  { id: "validate", label: "Validate", href: "/validate" },
-  { id: "import", label: "Import", href: "/import" },
+  { id: "connections", label: "Connections", path: "connections" },
+  { id: "extract", label: "Extract", path: "extract" },
+  { id: "clean", label: "Clean", path: "staging" },
+  { id: "validate", label: "Validate", path: "validate" },
+  { id: "import", label: "Import", path: "import" },
 ];
 
 interface ProgressStepperProps {
   current: MigrationStep;
   completed?: MigrationStep[];
+  projectId: number;
 }
 
-export function ProgressStepper({ current, completed = [] }: ProgressStepperProps) {
+export function ProgressStepper({
+  current,
+  completed = [],
+  projectId,
+}: ProgressStepperProps) {
   const currentIndex = STEPS.findIndex((s) => s.id === current);
+  const base = `/projects/${projectId}`;
   return (
     <nav aria-label="Migration progress" className="w-full">
       <ol className="flex w-full items-center gap-2">
         {STEPS.map((step, idx) => {
           const isCompleted = completed.includes(step.id) || idx < currentIndex;
           const isCurrent = step.id === current;
+          const href = `${base}/${step.path}`;
           return (
             <li key={step.id} className="flex flex-1 items-center gap-2">
               <a
-                href={step.href}
+                href={href}
                 className="flex items-center gap-2"
                 aria-current={isCurrent ? "step" : undefined}
               >

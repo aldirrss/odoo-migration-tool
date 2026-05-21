@@ -1,49 +1,15 @@
 /**
- * Connection profiles management.
- * Stores PostgreSQL connection details (source / target / staging) in
- * config/connections.json, with passwords encrypted using AES-256-GCM.
+ * Connection profiles management — DB-backed.
+ * Profile passwords are AES-256-GCM encrypted via ENCRYPTION_KEY.
  */
 
-import { promises as fs } from "fs";
-import path from "path";
 import crypto from "crypto";
+import { eq } from "drizzle-orm";
 import { z } from "zod";
+import { stagingDb, schema } from "./staging";
+import { encrypt, decrypt } from "../auth/crypto";
 
-const CONFIG_DIR = path.join(process.cwd(), "config");
-const CONFIG_FILE = path.join(CONFIG_DIR, "connections.json");
-
-const ALGORITHM = "aes-256-gcm";
-const IV_LENGTH = 12;
-
-function getKey(): Buffer {
-  const hex = process.env.ENCRYPTION_KEY;
-  if (!hex || hex.length !== 64) {
-    throw new Error(
-      "ENCRYPTION_KEY environment variable must be set to a 64-char hex string. " +
-        "Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"",
-    );
-  }
-  return Buffer.from(hex, "hex");
-}
-
-function encrypt(plaintext: string): string {
-  const iv = crypto.randomBytes(IV_LENGTH);
-  const cipher = crypto.createCipheriv(ALGORITHM, getKey(), iv);
-  const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return `${iv.toString("hex")}:${tag.toString("hex")}:${encrypted.toString("hex")}`;
-}
-
-function decrypt(payload: string): string {
-  const [ivHex, tagHex, dataHex] = payload.split(":");
-  if (!ivHex || !tagHex || !dataHex) throw new Error("Malformed encrypted payload");
-  const iv = Buffer.from(ivHex, "hex");
-  const tag = Buffer.from(tagHex, "hex");
-  const data = Buffer.from(dataHex, "hex");
-  const decipher = crypto.createDecipheriv(ALGORITHM, getKey(), iv);
-  decipher.setAuthTag(tag);
-  return Buffer.concat([decipher.update(data), decipher.final()]).toString("utf8");
-}
+export { encrypt, decrypt };
 
 export const connectionProfileSchema = z.object({
   id: z.string().min(1),
@@ -62,41 +28,36 @@ export const connectionProfileSchema = z.object({
 
 export type ConnectionProfile = z.infer<typeof connectionProfileSchema>;
 
-interface StoredProfile extends Omit<ConnectionProfile, "password"> {
-  passwordEncrypted: string;
-}
-
-async function ensureConfigDir(): Promise<void> {
-  await fs.mkdir(CONFIG_DIR, { recursive: true });
-}
-
-async function readStore(): Promise<StoredProfile[]> {
-  try {
-    const text = await fs.readFile(CONFIG_FILE, "utf8");
-    const parsed = JSON.parse(text);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw err;
-  }
-}
-
-async function writeStore(profiles: StoredProfile[]): Promise<void> {
-  await ensureConfigDir();
-  await fs.writeFile(CONFIG_FILE, JSON.stringify(profiles, null, 2), "utf8");
+function rowToProfile(row: typeof schema.connectionProfiles.$inferSelect): ConnectionProfile {
+  return {
+    id: row.id,
+    name: row.name,
+    role: row.role as "source" | "target",
+    host: row.host,
+    port: row.port,
+    database: row.database,
+    user: row.user,
+    password: decrypt(row.encryptedPassword),
+    ssl: row.ssl,
+    odooVersion: row.odooVersion ?? undefined,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
 }
 
 export async function listProfiles(): Promise<ConnectionProfile[]> {
-  const stored = await readStore();
-  return stored.map((s) => ({
-    ...s,
-    password: decrypt(s.passwordEncrypted),
-  }));
+  const rows = await stagingDb.select().from(schema.connectionProfiles);
+  return rows.map(rowToProfile);
 }
 
 export async function getProfile(id: string): Promise<ConnectionProfile | null> {
-  const profiles = await listProfiles();
-  return profiles.find((p) => p.id === id) ?? null;
+  const rows = await stagingDb
+    .select()
+    .from(schema.connectionProfiles)
+    .where(eq(schema.connectionProfiles.id, id))
+    .limit(1);
+  const row = rows[0];
+  return row ? rowToProfile(row) : null;
 }
 
 export async function saveProfile(
@@ -104,45 +65,75 @@ export async function saveProfile(
     id?: string;
   },
 ): Promise<ConnectionProfile> {
-  const stored = await readStore();
-  const now = new Date().toISOString();
   const id = input.id || crypto.randomUUID();
-  const idx = stored.findIndex((s) => s.id === id);
+  const now = new Date();
+  const existing = await stagingDb
+    .select()
+    .from(schema.connectionProfiles)
+    .where(eq(schema.connectionProfiles.id, id))
+    .limit(1);
 
-  const profile: ConnectionProfile = {
-    id,
-    name: input.name,
-    role: input.role,
-    host: input.host,
-    port: input.port ?? 5432,
-    database: input.database,
-    user: input.user,
-    password: input.password,
-    ssl: input.ssl ?? false,
-    odooVersion: input.odooVersion,
-    createdAt: idx >= 0 ? stored[idx]!.createdAt : now,
-    updatedAt: now,
-  };
+  const encryptedPassword = encrypt(input.password);
 
-  const { password: _pw, ...withoutPassword } = profile;
-  const toStore: StoredProfile = {
-    ...withoutPassword,
-    passwordEncrypted: encrypt(profile.password),
-  };
-
-  if (idx >= 0) {
-    stored[idx] = toStore;
-  } else {
-    stored.push(toStore);
+  if (existing[0]) {
+    const [updated] = await stagingDb
+      .update(schema.connectionProfiles)
+      .set({
+        name: input.name,
+        role: input.role,
+        host: input.host,
+        port: input.port ?? 5432,
+        database: input.database,
+        user: input.user,
+        encryptedPassword,
+        ssl: input.ssl ?? false,
+        odooVersion: input.odooVersion,
+        updatedAt: now,
+      })
+      .where(eq(schema.connectionProfiles.id, id))
+      .returning();
+    return rowToProfile(updated!);
   }
-  await writeStore(stored);
-  return profile;
+
+  const [inserted] = await stagingDb
+    .insert(schema.connectionProfiles)
+    .values({
+      id,
+      name: input.name,
+      role: input.role,
+      host: input.host,
+      port: input.port ?? 5432,
+      database: input.database,
+      user: input.user,
+      encryptedPassword,
+      ssl: input.ssl ?? false,
+      odooVersion: input.odooVersion,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning();
+  return rowToProfile(inserted!);
+}
+
+export async function createProfile(
+  input: Omit<ConnectionProfile, "id" | "createdAt" | "updatedAt">,
+): Promise<ConnectionProfile> {
+  return saveProfile(input);
+}
+
+export async function updateProfile(
+  id: string,
+  input: Partial<Omit<ConnectionProfile, "id" | "createdAt" | "updatedAt">>,
+): Promise<ConnectionProfile | null> {
+  const existing = await getProfile(id);
+  if (!existing) return null;
+  return saveProfile({ ...existing, ...input, id });
 }
 
 export async function deleteProfile(id: string): Promise<boolean> {
-  const stored = await readStore();
-  const next = stored.filter((s) => s.id !== id);
-  if (next.length === stored.length) return false;
-  await writeStore(next);
-  return true;
+  const result = await stagingDb
+    .delete(schema.connectionProfiles)
+    .where(eq(schema.connectionProfiles.id, id))
+    .returning({ id: schema.connectionProfiles.id });
+  return result.length > 0;
 }
