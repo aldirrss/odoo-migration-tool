@@ -20,7 +20,16 @@ export async function GET(
     }
     await assertExtractionJobBelongsToProject(jobId, projectId);
 
-    const search = url.searchParams.get("q") ?? url.searchParams.get("search") ?? undefined;
+    const legacySearch = url.searchParams.get("search") ?? undefined;
+    const searchTerms = url.searchParams.getAll("q").filter(Boolean);
+    const colSearchRaw = url.searchParams.getAll("qc").filter(Boolean);
+    const colSearchTerms = colSearchRaw
+      .map((raw) => {
+        const eqIdx = raw.indexOf("=");
+        if (eqIdx === -1) return null;
+        return { col: raw.slice(0, eqIdx), val: raw.slice(eqIdx + 1) };
+      })
+      .filter((x): x is { col: string; val: string } => x !== null);
     const filterDirty = url.searchParams.get("dirty") === "1";
     const deletedParam = url.searchParams.get("deleted");
     const filterDeleted =
@@ -33,7 +42,9 @@ export async function GET(
       const ids = await listStagedRecordIds({
         jobId,
         tableName: table,
-        search,
+        search: legacySearch,
+        searchTerms,
+        colSearchTerms,
         filterDirty,
         filterDeleted,
         filterValidationStatus,
@@ -50,7 +61,9 @@ export async function GET(
       tableName: table,
       page,
       pageSize,
-      search,
+      search: legacySearch,
+      searchTerms,
+      colSearchTerms,
       filterDirty,
       filterDeleted: filterDeleted ?? false,
       filterValidationStatus,

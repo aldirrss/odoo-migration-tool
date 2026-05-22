@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Next.js 14 (App Router) + TypeScript web tool for migrating data from a legacy Odoo 16 PostgreSQL database into a fresh Odoo DB (versions 16–19). The user-facing flow is a 5-step pipeline: **Connections → Extract → Clean → Validate → Import**.
+Next.js 15 (App Router) + TypeScript web tool for migrating data from a legacy Odoo 16 PostgreSQL database into a fresh Odoo DB (versions 16–19). The user-facing flow is a 5-step pipeline: **Connections → Extract → Clean → Validate → Import**.
 
 ## Commands
 

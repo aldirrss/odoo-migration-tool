@@ -22,7 +22,20 @@
       "Bash(grep -n \"fkByColumn=\\\\|fkByColumn$\" 'app/projects/[id]/staging/[table]/page.tsx')",
       "mcp__session__session_list",
       "mcp__session__session_read",
-      "mcp__session__session_write"
+      "mcp__session__session_write",
+      "Bash(mkdir -p /home/it-dev-mzt/project/web_app/react/odoo-migration-tool/app/api/projects/\\\\[id\\\\]/validate/status)",
+      "Bash(mkdir -p /home/it-dev-mzt/project/web_app/react/odoo-migration-tool/.claude/agents)",
+      "Bash(mkdir -p \"/home/it-dev-mzt/project/web_app/react/odoo-migration-tool/app/api/projects/[id]/staging/fk-options\")",
+      "Bash(mkdir -p /home/it-dev-mzt/project/web_app/react/odoo-migration-tool/app/api/projects/\\\\[id\\\\]/import/status)",
+      "Bash(mkdir -p /home/it-dev-mzt/project/web_app/react/odoo-migration-tool/app/api/projects/\\\\[id\\\\]/import/cancel)",
+      "Bash(git -C \"/home/it-dev-mzt/project/web_app/react/odoo-migration-tool\" worktree list)",
+      "Bash(git -C \"/home/it-dev-mzt/project/web_app/react/odoo-migration-tool\" branch -a)",
+      "Bash(git -C \"/home/it-dev-mzt/project/web_app/react/odoo-migration-tool\" status --short)"
+    ],
+    "additionalDirectories": [
+      "/home/it-dev-mzt/project/web_app/react/odoo-migration-tool/app/api/projects/[id]/validate",
+      "/home/it-dev-mzt/project/web_app/react/odoo-migration-tool/.claude",
+      "/home/it-dev-mzt/project/web_app/react/odoo-migration-tool/app/api/projects/[id]/staging"
     ]
   }
 }

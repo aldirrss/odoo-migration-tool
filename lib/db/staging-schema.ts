@@ -114,6 +114,25 @@ export const extractionJobs = pgTable("extraction_jobs", {
   qualityScanProgress: integer("quality_scan_progress").default(0).notNull(),
   qualityScanTotal: integer("quality_scan_total").default(0).notNull(),
   qualityScanSkipRequested: boolean("quality_scan_skip_requested").default(false).notNull(),
+  // Validation progress — persisted to DB so progress survives dev hot reloads
+  // and so the polling endpoint can read live state without a per-process map.
+  validationRunning: boolean("validation_running").default(false).notNull(),
+  validationCurrentTable: text("validation_current_table"),
+  validationProcessedTables: integer("validation_processed_tables").default(0).notNull(),
+  validationTotalTables: integer("validation_total_tables").default(0).notNull(),
+  validationProcessedRecords: integer("validation_processed_records").default(0).notNull(),
+  validationTotalRecords: integer("validation_total_records").default(0).notNull(),
+  validationCancelRequested: boolean("validation_cancel_requested").default(false).notNull(),
+  validationError: text("validation_error"),
+  // Import progress — mirroring the validation progress columns
+  importRunning: boolean("import_running").default(false).notNull(),
+  importCurrentTable: text("import_current_table"),
+  importProcessedTables: integer("import_processed_tables").default(0).notNull(),
+  importTotalTables: integer("import_total_tables").default(0).notNull(),
+  importProcessedRecords: integer("import_processed_records").default(0).notNull(),
+  importTotalRecords: integer("import_total_records").default(0).notNull(),
+  importCancelRequested: boolean("import_cancel_requested").default(false).notNull(),
+  importError: text("import_error"),
 });
 
 export const stagedRecords = pgTable(

@@ -19,7 +19,9 @@ export interface ListStagedRecordsOptions {
   tableName: string;
   page?: number;
   pageSize?: number;
-  search?: string;
+  search?: string;              // legacy single search term (kept for backwards compat)
+  searchTerms?: string[];       // multiple global AND terms
+  colSearchTerms?: Array<{ col: string; val: string }>;  // column-specific AND terms
   filterDirty?: boolean;
   filterDeleted?: boolean;
   filterValidationStatus?: string;
@@ -43,6 +45,8 @@ export async function listStagedRecords(
     page = 1,
     pageSize = 50,
     search,
+    searchTerms,
+    colSearchTerms,
     filterDirty,
     filterDeleted,
     filterValidationStatus,
@@ -64,10 +68,32 @@ export async function listStagedRecords(
   }
 
   if (search) {
-    // Search inside the staged_data JSONB as text
+    // Legacy single search term — search inside the staged_data JSONB as text
     filters.push(
       like(sql`${schema.stagedRecords.stagedData}::text`, `%${search}%`),
     );
+  }
+
+  // Multiple global search terms — each as a separate AND condition
+  if (searchTerms && searchTerms.length > 0) {
+    for (const term of searchTerms) {
+      if (term.trim()) {
+        filters.push(
+          like(sql`${schema.stagedRecords.stagedData}::text`, `%${term.trim()}%`),
+        );
+      }
+    }
+  }
+
+  // Column-specific search terms — use JSONB ->> operator then ILIKE
+  if (colSearchTerms && colSearchTerms.length > 0) {
+    for (const { col, val } of colSearchTerms) {
+      if (col && val.trim()) {
+        filters.push(
+          like(sql`${schema.stagedRecords.stagedData}->>${col}`, `%${val.trim()}%`),
+        );
+      }
+    }
   }
 
   const whereClause = and(...filters);
@@ -111,13 +137,18 @@ export async function updateStagedRecord(
   // Determine dirtiness by deep comparison vs source_data
   const isDirty = !shallowEqual(existing.sourceData as Record<string, unknown>, newStagedData);
 
+  // Only reset validationStatus when staged data actually changed — preserves
+  // the current pass/fail/warning badge on no-op saves (e.g. blur without edit).
+  const stagedDataChanged =
+    JSON.stringify(existing.stagedData) !== JSON.stringify(newStagedData);
+
   const [updated] = await stagingDb
     .update(schema.stagedRecords)
     .set({
       stagedData: newStagedData,
       isDirty,
       updatedAt: new Date(),
-      validationStatus: "pending",
+      ...(stagedDataChanged ? { validationStatus: "pending" } : {}),
     })
     .where(eq(schema.stagedRecords.id, id))
     .returning();
@@ -289,7 +320,9 @@ export { findTable, getIncomingRelations, getOutgoingRelations };
 export interface ListStagedRecordIdsOptions {
   jobId: number;
   tableName: string;
-  search?: string;
+  search?: string;              // legacy single search term (kept for backwards compat)
+  searchTerms?: string[];       // multiple global AND terms
+  colSearchTerms?: Array<{ col: string; val: string }>;  // column-specific AND terms
   filterDirty?: boolean;
   filterDeleted?: boolean;
   filterValidationStatus?: string;
@@ -315,6 +348,29 @@ export async function listStagedRecordIds(
       like(sql`${schema.stagedRecords.stagedData}::text`, `%${options.search}%`),
     );
   }
+
+  // Multiple global search terms — each as a separate AND condition
+  if (options.searchTerms && options.searchTerms.length > 0) {
+    for (const term of options.searchTerms) {
+      if (term.trim()) {
+        filters.push(
+          like(sql`${schema.stagedRecords.stagedData}::text`, `%${term.trim()}%`),
+        );
+      }
+    }
+  }
+
+  // Column-specific search terms — use JSONB ->> operator then ILIKE
+  if (options.colSearchTerms && options.colSearchTerms.length > 0) {
+    for (const { col, val } of options.colSearchTerms) {
+      if (col && val.trim()) {
+        filters.push(
+          like(sql`${schema.stagedRecords.stagedData}->>${col}`, `%${val.trim()}%`),
+        );
+      }
+    }
+  }
+
   const rows = await stagingDb
     .select({ id: schema.stagedRecords.id })
     .from(schema.stagedRecords)

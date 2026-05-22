@@ -57,13 +57,49 @@ export async function runImport(
   const tables = await getAllTables(projectId);
   const pool = getTargetPool(targetProfile);
 
+  // Count total records up-front so the progress UI shows accurate totals.
+  const totalRecordsRes = await stagingDb.execute(sql`
+    SELECT COUNT(*)::int AS total FROM staged_records
+    WHERE extraction_job_id = ${jobId} AND is_deleted = false
+  `);
+  const totalRecordsCount =
+    (totalRecordsRes.rows[0] as { total: number } | undefined)?.total ?? 0;
+
+  // Write accurate totals into the job row so the polling endpoint reflects
+  // real numbers from the very start.
+  await stagingDb
+    .update(schema.extractionJobs)
+    .set({
+      importTotalTables: tables.length,
+      importTotalRecords: totalRecordsCount,
+      importProcessedTables: 0,
+      importProcessedRecords: 0,
+      importError: null,
+    })
+    .where(eq(schema.extractionJobs.id, jobId));
+
   let totalRecords = 0;
   let totalSuccess = 0;
   let totalErrors = 0;
   let totalBlocked = 0;
+  let cumulativeProcessed = 0;
 
   try {
     for (const table of tables) {
+      // Check cancel flag before each table.
+      const cancelRows = await stagingDb
+        .select({ flag: schema.extractionJobs.importCancelRequested })
+        .from(schema.extractionJobs)
+        .where(eq(schema.extractionJobs.id, jobId))
+        .limit(1);
+      if (cancelRows[0]?.flag === true) break;
+
+      // Update current table in the progress row.
+      await stagingDb
+        .update(schema.extractionJobs)
+        .set({ importCurrentTable: table.tableName })
+        .where(eq(schema.extractionJobs.id, jobId));
+
       const summary = await importTable(
         jobId,
         table,
@@ -75,6 +111,16 @@ export async function runImport(
       totalSuccess += summary.success;
       totalErrors += summary.errors;
       totalBlocked += summary.blocked;
+      cumulativeProcessed += summary.total;
+
+      // Persist per-table progress after each table completes.
+      await stagingDb
+        .update(schema.extractionJobs)
+        .set({
+          importProcessedTables: sql`${schema.extractionJobs.importProcessedTables} + 1`,
+          importProcessedRecords: cumulativeProcessed,
+        })
+        .where(eq(schema.extractionJobs.id, jobId));
     }
 
     await stagingDb
@@ -88,15 +134,28 @@ export async function runImport(
       })
       .where(eq(schema.importJobs.id, importJob.id));
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
     await stagingDb
       .update(schema.importJobs)
       .set({
         status: "failed",
         finishedAt: new Date(),
-        errorMessage: err instanceof Error ? err.message : String(err),
+        errorMessage: message,
       })
       .where(eq(schema.importJobs.id, importJob.id));
+    await stagingDb
+      .update(schema.extractionJobs)
+      .set({ importError: message })
+      .where(eq(schema.extractionJobs.id, jobId));
     throw err;
+  } finally {
+    await stagingDb
+      .update(schema.extractionJobs)
+      .set({
+        importRunning: false,
+        importCurrentTable: null,
+      })
+      .where(eq(schema.extractionJobs.id, jobId));
   }
 
   return {
@@ -260,6 +319,58 @@ async function getTableColumns(
     throw new Error(`Table "${tableName}" not found in target database`);
   }
   return new Set(result.rows.map((r) => r.column_name));
+}
+
+export interface ImportRunState {
+  jobId: number;
+  running: boolean;
+  currentTable: string | null;
+  processedTables: number;
+  totalTables: number;
+  processedRecords: number;
+  totalRecords: number;
+  cancelRequested: boolean;
+  error: string | null;
+}
+
+export async function getImportState(
+  jobId: number,
+): Promise<ImportRunState | null> {
+  const rows = await stagingDb
+    .select({
+      id: schema.extractionJobs.id,
+      running: schema.extractionJobs.importRunning,
+      currentTable: schema.extractionJobs.importCurrentTable,
+      processedTables: schema.extractionJobs.importProcessedTables,
+      totalTables: schema.extractionJobs.importTotalTables,
+      processedRecords: schema.extractionJobs.importProcessedRecords,
+      totalRecords: schema.extractionJobs.importTotalRecords,
+      cancelRequested: schema.extractionJobs.importCancelRequested,
+      error: schema.extractionJobs.importError,
+    })
+    .from(schema.extractionJobs)
+    .where(eq(schema.extractionJobs.id, jobId))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    jobId: row.id,
+    running: row.running,
+    currentTable: row.currentTable,
+    processedTables: row.processedTables,
+    totalTables: row.totalTables,
+    processedRecords: row.processedRecords,
+    totalRecords: row.totalRecords,
+    cancelRequested: row.cancelRequested,
+    error: row.error,
+  };
+}
+
+export async function requestImportCancel(jobId: number): Promise<void> {
+  await stagingDb
+    .update(schema.extractionJobs)
+    .set({ importCancelRequested: true })
+    .where(eq(schema.extractionJobs.id, jobId));
 }
 
 export async function getImportSummary(jobId: number) {

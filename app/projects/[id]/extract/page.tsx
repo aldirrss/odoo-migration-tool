@@ -161,16 +161,19 @@ export default function ExtractPage({
     }
   }, [statusQuery.data?.job?.status]);
 
-  // Single source of truth for "is this extraction still in-flight": the job
-  // row in the staging DB. Survives page reloads and tab restores. While we're
-  // still loading status for a known activeJobId, treat it as running so the
-  // Start button can't be double-clicked during the fetch window.
-  const statusUnknown = !!activeJobId && statusQuery.isLoading;
+  // True only when we have confirmed server-side evidence that the job is
+  // actively running. statusQuery.isLoading is intentionally excluded here so
+  // that navigating to the page while a previous (finished) job is in Zustand
+  // does NOT flash the blocking modal while the status fetch is in-flight.
   const running =
     optimisticRunning ||
-    statusUnknown ||
     statusQuery.data?.job?.status === "running" ||
     statusQuery.data?.job?.status === "scanning_quality";
+
+  // Separate guard used only to lock the Start button while we don't yet know
+  // the job's current status (prevents accidental double-starts on slow networks).
+  const statusUnknown = !!activeJobId && statusQuery.isLoading;
+  const startLocked = running || statusUnknown;
 
   // Block tab close / reload while extraction is running.
   useEffect(() => {
@@ -216,7 +219,7 @@ export default function ExtractPage({
   const canStart =
     !!projectQuery.data?.sourceProfileId &&
     !!projectQuery.data?.targetProfileId &&
-    !running;
+    !startLocked;
 
   return (
     <div className="space-y-6">

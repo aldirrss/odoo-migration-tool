@@ -1,12 +1,12 @@
 "use client";
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import {
   ChevronLeft,
   ChevronRight,
-  Search,
   ArrowLeft,
   Loader2,
   Wand2,
@@ -24,6 +24,7 @@ import {
   ChevronsUpDown,
 } from "lucide-react";
 
+import { SmartSearchBar, type FilterChip } from "@/components/smart-search-bar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -118,14 +119,8 @@ export default function TableEditorPage({
   }, [projectId, setCurrentProject]);
 
   const [page, setPage] = useState(1);
-  const [searchInput, setSearchInput] = useState("");
-  const [search, setSearch] = useState("");
-  const [filterDirty, setFilterDirty] = useState(false);
-  const [filterDeleted, setFilterDeleted] = useState<"any" | "yes" | "no">("no");
-  const [filterValidation, setFilterValidation] = useState<string>("");
-  const [filterQuality, setFilterQuality] = useState<"all" | "block" | "warn" | "ok">(
-    "all",
-  );
+  const [filterChips, setFilterChips] = useState<FilterChip[]>([]);
+  const [pendingSearch, setPendingSearch] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [visibleColumns, setVisibleColumns] = useState<string[] | null>(null);
   const [showColumnPicker, setShowColumnPicker] = useState(false);
@@ -189,11 +184,56 @@ export default function TableEditorPage({
     }
   }, [latestJobQuery.data, activeJobId, setActiveJob]);
 
-  const debouncedSearch = useDebouncedValue(searchInput, 300);
+  const debouncedPendingSearch = useDebouncedValue(pendingSearch, 300);
+
+  // Derive filter values from chips + debounced pending text
+
+  // Global text chips (no column specified) + debounced pending search
+  const globalSearchTerms = [
+    ...filterChips
+      .filter(
+        (c): c is Extract<FilterChip, { kind: "text" }> =>
+          c.kind === "text" && !c.column,
+      )
+      .map((c) => c.value),
+    ...(debouncedPendingSearch.trim() ? [debouncedPendingSearch.trim()] : []),
+  ];
+
+  // Column-specific text chips
+  const colSearchTerms = filterChips
+    .filter(
+      (c): c is Extract<FilterChip, { kind: "text" }> =>
+        c.kind === "text" && !!c.column,
+    )
+    .map((c) => ({ col: c.column!, val: c.value }));
+
+  const filterDirty = filterChips.some((c) => c.kind === "dirty");
+
+  const deletedChip = filterChips.find(
+    (c): c is Extract<FilterChip, { kind: "deleted" }> => c.kind === "deleted",
+  );
+  const filterDeleted: "any" | "yes" | "no" = deletedChip
+    ? deletedChip.value === "yes"
+      ? "yes"
+      : "any"
+    : "no";
+
+  const validationChip = filterChips.find(
+    (c): c is Extract<FilterChip, { kind: "validation" }> => c.kind === "validation",
+  );
+  const filterValidation = validationChip ? validationChip.value : "";
+
+  const qualityChip = filterChips.find(
+    (c): c is Extract<FilterChip, { kind: "quality" }> => c.kind === "quality",
+  );
+  const filterQuality: "all" | "block" | "warn" | "ok" = qualityChip
+    ? qualityChip.value
+    : "all";
+
+  // Reset page when chips or debounced search changes
   useEffect(() => {
-    setSearch(debouncedSearch);
     setPage(1);
-  }, [debouncedSearch]);
+  }, [filterChips, debouncedPendingSearch]);
 
   const recordsQuery = useQuery({
     queryKey: [
@@ -202,7 +242,8 @@ export default function TableEditorPage({
       activeJobId,
       tableName,
       page,
-      search,
+      globalSearchTerms,
+      colSearchTerms,
       filterDirty,
       filterDeleted,
       filterValidation,
@@ -216,7 +257,12 @@ export default function TableEditorPage({
       url.searchParams.set("jobId", String(activeJobId));
       url.searchParams.set("page", String(page));
       url.searchParams.set("pageSize", String(PAGE_SIZE));
-      if (search) url.searchParams.set("q", search);
+      for (const term of globalSearchTerms) {
+        url.searchParams.append("q", term);
+      }
+      for (const { col, val } of colSearchTerms) {
+        url.searchParams.append("qc", `${col}=${val}`);
+      }
       if (filterDirty) url.searchParams.set("dirty", "1");
       if (filterDeleted === "yes") url.searchParams.set("deleted", "1");
       if (filterDeleted === "no") url.searchParams.set("deleted", "0");
@@ -431,7 +477,12 @@ export default function TableEditorPage({
     );
     url.searchParams.set("jobId", String(activeJobId));
     url.searchParams.set("idsOnly", "1");
-    if (search) url.searchParams.set("q", search);
+    for (const term of globalSearchTerms) {
+      url.searchParams.append("q", term);
+    }
+    for (const { col, val } of colSearchTerms) {
+      url.searchParams.append("qc", `${col}=${val}`);
+    }
     if (filterDirty) url.searchParams.set("dirty", "1");
     if (filterDeleted === "yes") url.searchParams.set("deleted", "1");
     if (filterDeleted === "no") url.searchParams.set("deleted", "0");
@@ -459,17 +510,25 @@ export default function TableEditorPage({
     setEditValue(currentValue == null ? "" : String(currentValue));
   };
 
-  const commitCellEdit = (record: StagedRecord) => {
+  const commitCellEdit = (record: StagedRecord, overrideValue?: unknown) => {
     if (!editingCell) return;
     const current = (record.stagedData as Record<string, unknown>)[editingCell.column];
-    let parsed: unknown = editValue;
-    if (isTranslationDict(current)) {
-      // Preserve other locales; only update the preferred one.
-      parsed = wrapTranslation(current, editValue);
-    } else if (typeof current === "number") {
-      parsed = Number(editValue);
-    } else if (typeof current === "boolean") {
-      parsed = editValue === "true";
+    let parsed: unknown = overrideValue !== undefined ? overrideValue : editValue;
+    if (overrideValue === undefined) {
+      if (isTranslationDict(current)) {
+        // Preserve other locales; only update the preferred one.
+        parsed = wrapTranslation(current, editValue);
+      } else if (typeof current === "number") {
+        parsed = Number(editValue);
+      } else if (typeof current === "boolean") {
+        parsed = editValue === "true";
+      }
+    }
+    // Skip the API call if nothing actually changed — prevents resetting
+    // validationStatus to "pending" on a no-op click.
+    if (JSON.stringify(parsed) === JSON.stringify(current)) {
+      setEditingCell(null);
+      return;
     }
     const next = { ...(record.stagedData as Record<string, unknown>), [editingCell.column]: parsed };
     setEditingCell(null);
@@ -517,75 +576,19 @@ export default function TableEditorPage({
 
       <Card>
         <CardContent className="space-y-3 pt-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="relative max-w-sm flex-1">
-              <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                placeholder="Search inside row data..."
-                value={searchInput}
-                onChange={(e) => setSearchInput(e.target.value)}
-                className="pl-8"
-              />
-            </div>
-            <label className="flex items-center gap-1.5 text-sm">
-              <Checkbox
-                checked={filterDirty}
-                onCheckedChange={(v) => {
-                  setFilterDirty(v === true);
-                  setPage(1);
-                }}
-              />
-              Dirty only
-            </label>
-            <div className="flex items-center gap-1.5 text-sm">
-              <span>Deleted:</span>
-              <select
-                className="h-8 rounded-md border bg-background px-2 text-sm"
-                value={filterDeleted}
-                onChange={(e) => {
-                  setFilterDeleted(e.target.value as "any" | "yes" | "no");
-                  setPage(1);
-                }}
-              >
-                <option value="no">no</option>
-                <option value="yes">yes</option>
-                <option value="any">any</option>
-              </select>
-            </div>
-            <div className="flex items-center gap-1.5 text-sm">
-              <span>Validation:</span>
-              <select
-                className="h-8 rounded-md border bg-background px-2 text-sm"
-                value={filterValidation}
-                onChange={(e) => {
-                  setFilterValidation(e.target.value);
-                  setPage(1);
-                }}
-              >
-                <option value="">any</option>
-                <option value="pending">pending</option>
-                <option value="pass">pass</option>
-                <option value="warning">warning</option>
-                <option value="fail">fail</option>
-              </select>
-            </div>
-            <div className="flex items-center gap-1.5 text-sm">
-              <span>Quality:</span>
-              <select
-                className="h-8 rounded-md border bg-background px-2 text-sm"
-                value={filterQuality}
-                onChange={(e) =>
-                  setFilterQuality(
-                    e.target.value as "all" | "block" | "warn" | "ok",
-                  )
-                }
-              >
-                <option value="all">All</option>
-                <option value="block">Block only</option>
-                <option value="warn">Warn only</option>
-                <option value="ok">Clean only</option>
-              </select>
-            </div>
+          <div className="flex items-center gap-2">
+            <SmartSearchBar
+              chips={filterChips}
+              pendingText={pendingSearch}
+              onChipsChange={(chips) => {
+                setFilterChips(chips);
+                setPage(1);
+              }}
+              onPendingTextChange={setPendingSearch}
+              columns={displayColumns}
+              placeholder="Search or add filter..."
+              className="flex-1"
+            />
             <Button
               size="sm"
               variant="outline"
@@ -600,39 +603,37 @@ export default function TableEditorPage({
               )}
               Re-scan
             </Button>
-            <div className="ml-auto flex items-center gap-2">
-              <Button
-                size="sm"
-                variant={diffMode ? "default" : "outline"}
-                onClick={() => {
-                  setDiffMode((v) => !v);
-                  if (!diffMode) setSplitView(false);
-                }}
-                title="Show source vs staged stacked inside each cell"
-              >
-                <GitCompare className="mr-1 h-3 w-3" />
-                Diff
-              </Button>
-              <Button
-                size="sm"
-                variant={splitView ? "default" : "outline"}
-                onClick={() => {
-                  setSplitView((v) => !v);
-                  if (!splitView) setDiffMode(false);
-                }}
-                title="Show two side-by-side tables: source (read-only) | staged (editable)"
-              >
-                <Columns2 className="mr-1 h-3 w-3" />
-                Split
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => setShowColumnPicker(true)}
-              >
-                Columns ({displayColumns.length})
-              </Button>
-            </div>
+            <Button
+              size="sm"
+              variant={diffMode ? "default" : "outline"}
+              onClick={() => {
+                setDiffMode((v) => !v);
+                if (!diffMode) setSplitView(false);
+              }}
+              title="Show source vs staged stacked inside each cell"
+            >
+              <GitCompare className="mr-1 h-3 w-3" />
+              Diff
+            </Button>
+            <Button
+              size="sm"
+              variant={splitView ? "default" : "outline"}
+              onClick={() => {
+                setSplitView((v) => !v);
+                if (!splitView) setDiffMode(false);
+              }}
+              title="Show two side-by-side tables: source (read-only) | staged (editable)"
+            >
+              <Columns2 className="mr-1 h-3 w-3" />
+              Split
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setShowColumnPicker(true)}
+            >
+              Columns ({displayColumns.length})
+            </Button>
           </div>
 
           <div className="flex flex-wrap items-center gap-3 border-t pt-3">
@@ -816,6 +817,8 @@ export default function TableEditorPage({
                             ? (acknowledgeMutation.variables as number | undefined) ?? null
                             : null
                         }
+                        projectId={projectId}
+                        activeJobId={activeJobId}
                       />
                     );
                   })}
@@ -904,6 +907,8 @@ export default function TableEditorPage({
                           ? (acknowledgeMutation.variables as number | undefined) ?? null
                           : null
                       }
+                      projectId={projectId}
+                      activeJobId={activeJobId}
                     />
                   );
                 })}
@@ -1074,6 +1079,165 @@ function QualityColumnHeader({
   );
 }
 
+const FK_LABEL_MAX = 28;
+
+function truncateLabel(label: string): string {
+  if (!label) return "";
+  return label.length > FK_LABEL_MAX ? label.slice(0, FK_LABEL_MAX) + "…" : label;
+}
+
+function FkCombobox({
+  projectId,
+  jobId,
+  targetTable,
+  currentId,
+  onSelect,
+  onClose,
+}: {
+  projectId: number;
+  jobId: number | null;
+  targetTable: string;
+  currentId: number | null;
+  onSelect: (id: number | null) => void;
+  onClose: () => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties>({});
+  const inputRef = useRef<HTMLInputElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const optionsQuery = useQuery({
+    queryKey: ["fk-options", projectId, jobId, targetTable, search],
+    enabled: !!jobId,
+    queryFn: async () => {
+      const url = new URL(
+        `/api/projects/${projectId}/staging/fk-options`,
+        window.location.origin,
+      );
+      url.searchParams.set("table", targetTable);
+      url.searchParams.set("jobId", String(jobId));
+      if (search) url.searchParams.set("q", search);
+      const r = await fetch(url.toString());
+      if (!r.ok) return [] as Array<{ id: number; label: string }>;
+      return ((await r.json()) as { options: Array<{ id: number; label: string }> }).options;
+    },
+    staleTime: 30_000,
+  });
+
+  // Position dropdown via fixed coords to escape table cell overflow:hidden
+  const updatePosition = useCallback(() => {
+    if (!inputRef.current) return;
+    const rect = inputRef.current.getBoundingClientRect();
+    const isDark = document.documentElement.classList.contains("dark");
+    setDropdownStyle({
+      position: "fixed",
+      top: rect.bottom + 2,
+      left: rect.left,
+      width: Math.max(rect.width, 224),
+      zIndex: 9999,
+      backgroundColor: isDark ? "hsl(240 10% 3.9%)" : "#ffffff",
+      border: "1px solid hsl(240 5.9% 90%)",
+      borderRadius: "6px",
+      boxShadow: "0 4px 16px rgba(0,0,0,0.12)",
+    });
+  }, []);
+
+  useEffect(() => {
+    updatePosition();
+    window.addEventListener("scroll", updatePosition, true);
+    window.addEventListener("resize", updatePosition);
+    return () => {
+      window.removeEventListener("scroll", updatePosition, true);
+      window.removeEventListener("resize", updatePosition);
+    };
+  }, [updatePosition]);
+
+  // Close on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [onClose]);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  const options = optionsQuery.data ?? [];
+
+  const dropdown = (
+    <div style={dropdownStyle} className="max-h-52 overflow-y-auto">
+      {optionsQuery.isLoading ? (
+        <div className="flex items-center justify-center gap-1 py-2 text-xs text-muted-foreground">
+          <Loader2 className="h-3 w-3 animate-spin" />
+          Loading…
+        </div>
+      ) : options.length === 0 ? (
+        <div className="py-2 text-center text-xs text-muted-foreground">No results</div>
+      ) : (
+        <ul className="py-1">
+          {currentId !== null && (
+            <li>
+              <button
+                type="button"
+                className="w-full px-2 py-1 text-left text-xs text-muted-foreground hover:bg-muted"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  onSelect(null);
+                }}
+              >
+                — clear (set null)
+              </button>
+            </li>
+          )}
+          {options.map((opt) => (
+            <li key={opt.id}>
+              <button
+                type="button"
+                className={`w-full px-2 py-1 text-left text-xs hover:bg-muted ${
+                  opt.id === currentId ? "bg-muted/60 font-medium" : ""
+                }`}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  onSelect(opt.id);
+                }}
+                title={opt.label ? `${opt.id} — ${opt.label}` : String(opt.id)}
+              >
+                <span className="font-mono text-muted-foreground">{opt.id}</span>
+                {opt.label && (
+                  <span className="ml-1 text-foreground">
+                    — {truncateLabel(opt.label)}
+                  </span>
+                )}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+
+  return (
+    <div ref={containerRef}>
+      <input
+        ref={inputRef}
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") onClose();
+        }}
+        placeholder={currentId ? `Current: ${currentId}` : "Search…"}
+        className="h-7 w-full rounded border bg-background px-1.5 text-xs"
+      />
+      {typeof document !== "undefined" && createPortal(dropdown, document.body)}
+    </div>
+  );
+}
+
 function StagedRowCells({
   record: r,
   displayColumns,
@@ -1091,6 +1255,8 @@ function StagedRowCells({
   toggleRowSelection,
   onAcknowledgeQuality,
   acknowledgingId,
+  projectId,
+  activeJobId,
 }: {
   record: StagedRecord;
   displayColumns: string[];
@@ -1098,7 +1264,7 @@ function StagedRowCells({
   editValue: string;
   setEditValue: (v: string) => void;
   startEditingCell: (recordId: number, column: string, currentValue: unknown) => void;
-  commitCellEdit: (record: StagedRecord) => void;
+  commitCellEdit: (record: StagedRecord, overrideValue?: unknown) => void;
   setEditingCell: (v: { recordId: number; column: string } | null) => void;
   getFk: (column: string) => RelationDefinition | null;
   setFkPreview: (v: { relation: RelationDefinition; sourceId: number } | null) => void;
@@ -1108,6 +1274,8 @@ function StagedRowCells({
   toggleRowSelection: (id: number, checked: boolean) => void;
   onAcknowledgeQuality: (recordId: number) => void;
   acknowledgingId: number | null;
+  projectId: number;
+  activeJobId: number | null;
 }) {
   return (
     <TableRow className={`align-top ${r.isDeleted ? "opacity-60" : ""}`}>
@@ -1136,17 +1304,28 @@ function StagedRowCells({
             className={`text-xs ${changed ? "bg-yellow-50" : ""}`}
           >
             {isEditing ? (
-              <input
-                autoFocus
-                value={editValue}
-                onChange={(e) => setEditValue(e.target.value)}
-                onBlur={() => commitCellEdit(r)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") commitCellEdit(r);
-                  else if (e.key === "Escape") setEditingCell(null);
-                }}
-                className="h-7 w-full rounded border bg-background px-1.5"
-              />
+              fkRel ? (
+                <FkCombobox
+                  projectId={projectId}
+                  jobId={activeJobId}
+                  targetTable={fkRel.toTable}
+                  currentId={typeof stagedValue === "number" ? stagedValue : null}
+                  onSelect={(id) => commitCellEdit(r, id)}
+                  onClose={() => setEditingCell(null)}
+                />
+              ) : (
+                <input
+                  autoFocus
+                  value={editValue}
+                  onChange={(e) => setEditValue(e.target.value)}
+                  onBlur={() => commitCellEdit(r)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitCellEdit(r);
+                    else if (e.key === "Escape") setEditingCell(null);
+                  }}
+                  className="h-7 w-full rounded border bg-background px-1.5"
+                />
+              )
             ) : (
               <div className="flex items-center gap-1">
                 <div
